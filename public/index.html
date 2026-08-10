@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>本地 AI 笔记</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📝</text></svg>">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ============ 左侧边栏 ============ -->
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">📝 <span>本地 AI 笔记</span></div>
+      <button id="collapseBtn" class="icon-btn sidebar-collapse-btn" type="button" title="收起侧边栏" aria-label="收起侧边栏">«</button>
+    </div>
+    <div class="search-wrap">
+      <input id="searchInput" type="search" placeholder="搜索笔记…" autocomplete="off">
+    </div>
+    <div class="sort-bar">
+      <label for="sortSelect" class="sort-label">排序</label>
+      <select id="sortSelect" class="sort-select" title="笔记排序方式">
+        <option value="time">按时间</option>
+        <option value="az">按名称 A-Z</option>
+        <option value="custom">自定义（拖动排序）</option>
+      </select>
+    </div>
+    <div class="tag-section">
+      <div class="tag-title">标签</div>
+      <div id="tagList" class="tag-list"></div>
+    </div>
+    <div id="noteList" class="note-list"></div>
+    <button id="newNoteBtn" class="btn primary new-note-btn" type="button">＋ 新建笔记</button>
+    <div id="sidebarResizer" class="sidebar-resizer" title="拖动调整宽度"></div>
+  </aside>
+  <div id="sidebarBackdrop" class="hidden"></div>
+
+  <!-- ============ 右侧主区 ============ -->
+  <main id="main">
+    <header class="topbar">
+      <button id="menuBtn" class="icon-btn menu-btn" type="button" title="菜单">☰</button>
+      <div id="saveStatus" class="save-status"></div>
+      <div class="topbar-actions">
+        <button id="summarizeBtn" class="btn" type="button" disabled>✨ AI 总结</button>
+        <button id="reviewBtn" class="btn" type="button" disabled>🧠 开始复盘</button>
+        <button id="settingsBtn" class="btn" type="button">⚙️ 设置</button>
+      </div>
+    </header>
+
+    <!-- 主区加载中 -->
+    <div id="mainLoading" class="main-loading">加载中…</div>
+
+    <!-- 空态 -->
+    <section id="emptyState" class="empty-state hidden">
+      <div class="empty-icon">📝</div>
+      <h2>还没有笔记</h2>
+      <p>点击下方按钮，创建你的第一条笔记</p>
+      <button id="emptyNewBtn" class="btn primary" type="button">新建笔记</button>
+    </section>
+
+    <!-- 编辑器 -->
+    <section id="editorView" class="editor-view hidden">
+      <input id="titleInput" class="title-input" type="text" placeholder="标题" autocomplete="off">
+      <div class="mode-toggle" role="tablist">
+        <button type="button" class="mode-btn active" data-mode="edit">编辑</button>
+        <button type="button" class="mode-btn" data-mode="source">源码</button>
+      </div>
+      <div id="editorArea" class="editor-area">
+        <div id="mdToolbar" class="md-toolbar" role="toolbar" aria-label="Markdown 工具栏">
+          <div class="md-group">
+            <button type="button" class="md-btn" data-md="bold" title="加粗" aria-label="加粗"><svg viewBox="0 0 24 24"><path d="M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/><path d="M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/></svg></button>
+            <button type="button" class="md-btn" data-md="italic" title="斜体" aria-label="斜体"><svg viewBox="0 0 24 24"><path d="M19 4h-9"/><path d="M14 20H5"/><path d="M15 4L9 20"/></svg></button>
+            <button type="button" class="md-btn md-label-btn" data-md="h1" title="标题 1" aria-label="标题 1">H1</button>
+            <button type="button" class="md-btn md-label-btn" data-md="h2" title="标题 2" aria-label="标题 2">H2</button>
+            <button type="button" class="md-btn md-label-btn" data-md="h3" title="标题 3" aria-label="标题 3">H3</button>
+          </div>
+          <div class="md-sep" aria-hidden="true"></div>
+          <div class="md-group">
+            <button type="button" class="md-btn" data-md="ul" title="无序列表" aria-label="无序列表"><svg viewBox="0 0 24 24"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg></button>
+            <button type="button" class="md-btn" data-md="ol" title="有序列表" aria-label="有序列表"><svg viewBox="0 0 24 24"><path d="M10 6h11"/><path d="M10 12h11"/><path d="M10 18h11"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/><path d="M7 18h.01"/></svg></button>
+          </div>
+          <div class="md-sep" aria-hidden="true"></div>
+          <div class="md-group">
+            <button type="button" class="md-btn" data-md="quote" title="引用" aria-label="引用"><svg viewBox="0 0 24 24"><path d="M16 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z"/><path d="M5 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z"/></svg></button>
+            <button type="button" class="md-btn" data-md="code" title="行内代码" aria-label="行内代码"><svg viewBox="0 0 24 24"><path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/></svg></button>
+            <button type="button" class="md-btn" data-md="codeblock" title="代码块" aria-label="代码块"><svg viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="m10 9.5 2 2.5-2 2.5"/><path d="m14 9.5-2 2.5 2 2.5"/></svg></button>
+          </div>
+          <div class="md-sep" aria-hidden="true"></div>
+          <div class="md-group">
+            <button type="button" class="md-btn" data-md="link" title="链接" aria-label="链接"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></button>
+            <button type="button" class="md-btn" data-md="image" title="图片" aria-label="图片"><svg viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg></button>
+          </div>
+          <div class="md-sep" aria-hidden="true"></div>
+          <div class="md-group">
+            <button type="button" class="md-btn" data-md="hr" title="分割线" aria-label="分割线"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+          </div>
+          <div class="md-sep" aria-hidden="true"></div>
+          <div class="md-group">
+            <button type="button" class="md-btn" id="tocBtn" title="目录" aria-label="目录"><svg viewBox="0 0 24 24"><path d="M4 5h6v4H4z"/><path d="M4 15h6v4H4z"/><path d="M13 7h7"/><path d="M13 17h7"/><path d="M13 12h7"/></svg></button>
+          </div>
+          <div class="md-sep" aria-hidden="true"></div>
+          <div class="md-group">
+            <button type="button" class="md-btn" id="fontSizeDown" title="缩小字体" aria-label="缩小字体">A⁻</button>
+            <span id="fontSizeLabel" class="font-size-label">15</span>
+            <button type="button" class="md-btn" id="fontSizeUp" title="放大字体" aria-label="放大字体">A⁺</button>
+          </div>
+        </div>
+        <textarea id="contentInput" class="content-input" placeholder="开始书写…（支持 Markdown，也可用上方按钮）" spellcheck="false"></textarea>
+        <div id="renderEdit" class="render-edit" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="true" aria-label="笔记编辑器"></div>
+        <aside id="tocPanel" class="toc-panel hidden">
+          <div class="toc-header">
+            <span>📑 目录</span>
+            <button id="tocClose" class="icon-btn" type="button" title="关闭目录" aria-label="关闭目录">✕</button>
+          </div>
+          <nav id="tocList" class="toc-list" aria-label="笔记目录"></nav>
+        </aside>
+      </div>
+      <div class="tags-row">
+        <label for="tagsInput">标签</label>
+        <input id="tagsInput" class="tags-input" type="text" placeholder="用逗号分隔，如：工作, 学习" autocomplete="off">
+      </div>
+      <div id="quickTags" class="quick-tags"></div>
+
+      <!-- AI 总结面板 -->
+      <div id="summaryPanel" class="summary-panel hidden">
+        <div class="summary-header">
+          <span>✨ AI 总结</span>
+          <button id="summaryToggle" class="link-btn" type="button">收起</button>
+        </div>
+        <div id="summaryBody" class="summary-body"></div>
+      </div>
+    </section>
+
+    <!-- ============ 提问式复盘 ============ -->
+    <section id="reviewView" class="review-view hidden">
+
+      <!-- 答题阶段 -->
+      <div id="reviewQuestionStage">
+        <div class="review-header">
+          <div>
+            <h2>🧠 提问式复盘</h2>
+            <div class="review-meta">
+              <span id="reviewNoteTitle"></span>
+              <span> · </span>
+              <span id="reviewProgress">第 1 题 · 已答对 0 题</span>
+            </div>
+          </div>
+          <div class="review-header-actions">
+            <button id="endReviewBtn" class="btn danger-ghost" type="button">结束复盘</button>
+            <button id="closeReviewBtn" class="icon-btn" type="button" title="关闭">✕</button>
+          </div>
+        </div>
+
+        <div id="reviewQuestionCard" class="review-question-card"></div>
+
+        <textarea id="reviewAnswerInput" class="review-answer" placeholder="输入你的回答…" spellcheck="false"></textarea>
+
+        <div class="review-actions">
+          <button id="submitAnswerBtn" class="btn primary" type="button">提交回答</button>
+        </div>
+
+        <!-- 评判结果 -->
+        <div id="verdictArea" class="verdict-area hidden">
+          <div id="verdictBadge" class="verdict-badge"></div>
+          <div id="verdictComment" class="verdict-comment"></div>
+          <div class="reference-box">
+            <button id="referenceToggle" class="reference-toggle" type="button">📎 参考要点（引用笔记原文）</button>
+            <div id="referenceBody" class="reference-body hidden"></div>
+          </div>
+          <div class="verdict-actions">
+            <button id="nextQuestionBtn" class="btn primary hidden" type="button">下一题 →</button>
+            <button id="showReportBtn" class="btn primary hidden" type="button">查看复盘报告</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 报告阶段 -->
+      <div id="reviewReportStage" class="hidden">
+        <div class="report-header">
+          <h2>📊 复盘报告</h2>
+        </div>
+        <div class="report-stats">
+          <div class="stat-card"><div class="num" id="reportTotal">0</div><div class="label">总题数</div></div>
+          <div class="stat-card good"><div class="num" id="reportCorrect">0</div><div class="label">✅ 回答正确</div></div>
+          <div class="stat-card partial"><div class="num" id="reportPartial">0</div><div class="label">⚠️ 部分正确</div></div>
+          <div class="stat-card bad"><div class="num" id="reportWrong">0</div><div class="label">❌ 回答错误</div></div>
+        </div>
+        <div class="report-section">
+          <h3>薄弱点</h3>
+          <div id="weakTopicsBox" class="weak-topics"></div>
+        </div>
+        <div class="report-section">
+          <h3>学习建议</h3>
+          <ul id="suggestionsList" class="suggestions"></ul>
+        </div>
+        <div class="report-actions">
+          <button id="reportCloseBtn" class="btn primary" type="button">返回笔记</button>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- ============ 设置模态 ============ -->
+<div id="settingsModal" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>设置</h2>
+      <button id="closeSettingsBtn" class="icon-btn" type="button" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <label for="providerSelect">AI 提供商</label>
+      <select id="providerSelect"></select>
+
+      <label for="baseURLInput">Base URL</label>
+      <input id="baseURLInput" type="text" placeholder="https://api.openai.com/v1" autocomplete="off">
+
+      <label for="modelInput">Model</label>
+      <input id="modelInput" type="text" placeholder="gpt-4o-mini" autocomplete="off">
+
+      <label for="apiKeyInput">API Key</label>
+      <div class="api-key-row">
+        <input id="apiKeyInput" type="password" placeholder="sk-…" autocomplete="off">
+        <button id="clearKeyBtn" class="btn danger-ghost hidden" type="button">清除</button>
+      </div>
+      <p class="hint">API Key 仅保存在本地配置中，不会上传到云端。清除后需要重新填写。</p>
+    </div>
+    <div class="modal-footer">
+      <button id="cancelSettingsBtn" class="btn" type="button">取消</button>
+      <button id="testConnBtn" class="btn" type="button">🔌 测试连接</button>
+      <button id="saveSettingsBtn" class="btn primary" type="button">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 确认对话框 ============ -->
+<div id="confirmDialog" class="modal-overlay hidden">
+  <div class="modal small">
+    <p id="confirmText" class="confirm-text"></p>
+    <div class="modal-footer">
+      <button id="confirmCancelBtn" class="btn" type="button">取消</button>
+      <button id="confirmOkBtn" class="btn danger" type="button">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Toast ============ -->
+<div id="toastContainer" class="toast-container"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

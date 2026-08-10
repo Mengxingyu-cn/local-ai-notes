@@ -1,0 +1,13 @@
+{
+  "name": "local-ai-notes",
+  "version": "1.0.0",
+  "description": "本地 AI 笔记应用：笔记管理 + AI 总结 + 多 API 接入 + 提问式复盘",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
