@@ -199,10 +199,73 @@ function handleNotes(req, res, segments) {
       const notes = storage.loadNotes();
       const idx = notes.findIndex((n) => n.id === id);
       if (idx < 0) return sendJSON(res, 404, { error: '笔记不存在' });
-      notes.splice(idx, 1);
+      // 软删除：整体移入回收站（含 AI 总结 summary），不直接删除
+      const [note] = notes.splice(idx, 1);
+      note.deletedAt = Date.now();
+      const trash = storage.loadTrash();
+      trash.unshift(note);
+      if (trash.length > 200) trash.length = 200; // 回收站容量上限，防无限增长
+      storage.saveTrash(trash);
       storage.saveNotes(notes);
       return ok(res, { ok: true });
     }).catch((e) => fail(res, e));
+  }
+  return sendJSON(res, 405, { error: '方法不支持' });
+}
+
+// ---------- 回收站路由 ----------
+function handleTrash(req, res, segments) {
+  // /api/trash
+  if (segments.length === 0) {
+    if (req.method === 'GET') {
+      const trash = storage.loadTrash().sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0)); // 最新删除在前
+      return ok(res, { trash });
+    }
+    return sendJSON(res, 405, { error: '方法不支持' });
+  }
+
+  // /api/trash/clear —— 清空回收站
+  if (segments.length === 1 && segments[0] === 'clear') {
+    if (req.method !== 'POST') return sendJSON(res, 405, { error: '方法不支持' });
+    return readBody(req).then(() => {
+      storage.saveTrash([]);
+      return ok(res, { ok: true });
+    }).catch((e) => fail(res, e));
+  }
+
+  // /api/trash/:id[/restore]
+  const id = safeDecode(segments[0]);
+  if (id === null) return sendJSON(res, 400, { error: '无效的笔记 ID' });
+  const restore = segments.length > 1 && segments[1] === 'restore';
+
+  if (restore && req.method === 'POST') {
+    const trash = storage.loadTrash();
+    const ti = trash.findIndex((n) => n.id === id);
+    if (ti < 0) return sendJSON(res, 404, { error: '回收站中没有此笔记' });
+    const notes = storage.loadNotes();
+    if (notes.some((n) => n.id === id)) {
+      // 查重幂等：笔记已存在（并发/崩溃残留），仅从回收站移除，不重复添加
+      trash.splice(ti, 1);
+      storage.saveTrash(trash);
+      return ok(res, { ok: true });
+    }
+    const [note] = trash.splice(ti, 1);
+    delete note.deletedAt;      // 恢复后清除删除标记（summary 等字段原样保留）
+    delete note.order;          // 清除排序位，custom 模式下按时间兜底排到列表尾部
+    note.updatedAt = Date.now(); // 刷新更新时间，按时间排序时恢复的笔记出现在最前
+    notes.push(note);
+    // 顺序关键：先写 notes（新位置）再写 trash（移除），任一失败都不会丢笔记
+    storage.saveNotes(notes);
+    storage.saveTrash(trash);
+    return ok(res, { ok: true, note });
+  }
+  if (!restore && req.method === 'DELETE') {
+    const trash = storage.loadTrash();
+    const ti = trash.findIndex((n) => n.id === id);
+    if (ti < 0) return sendJSON(res, 404, { error: '回收站中没有此笔记' });
+    trash.splice(ti, 1);
+    storage.saveTrash(trash);
+    return ok(res, { ok: true });
   }
   return sendJSON(res, 405, { error: '方法不支持' });
 }
@@ -354,6 +417,10 @@ const server = http.createServer((req, res) => {
   }
   if (pathname === '/api/settings') {
     return handleSettings(req, res);
+  }
+  if (pathname === '/api/trash' || pathname.startsWith('/api/trash/')) {
+    const segments = pathname.slice('/api/trash/'.length).split('/').filter(Boolean);
+    return handleTrash(req, res, segments);
   }
   if (pathname === '/api/review-history' || pathname.startsWith('/api/review-history/')) {
     const segments = pathname.slice('/api/review-history/'.length).split('/').filter(Boolean);

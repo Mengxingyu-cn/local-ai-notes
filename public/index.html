@@ -213,6 +213,7 @@
     <div class="settings-tabs" role="tablist">
       <button type="button" class="settings-tab active" data-tab="api" role="tab" aria-selected="true">🔌 API 设置</button>
       <button type="button" class="settings-tab" data-tab="history" role="tab" aria-selected="false">📚 复盘历史记录</button>
+      <button type="button" class="settings-tab" data-tab="trash" role="tab" aria-selected="false">🗑 回收站</button>
     </div>
     <div class="modal-body">
       <!-- API 设置面板 -->
@@ -244,6 +245,15 @@
             <button id="historyDeleteBtn" class="btn danger" type="button">🗑 删除此记录</button>
           </div>
         </div>
+      </div>
+
+      <!-- 回收站面板 -->
+      <div id="trashPanel" class="settings-panel hidden">
+        <div class="trash-toolbar">
+          <span id="trashCount" class="trash-count"></span>
+          <button id="trashClearBtn" class="btn danger-ghost hidden" type="button">🗑 清空回收站</button>
+        </div>
+        <div id="trashList" class="trash-list"></div>
       </div>
     </div>
     <div class="modal-footer">

@@ -77,4 +77,13 @@ function saveReviewHistory(history) {
   saveJSON('review-history.json', { history });
 }
 
-module.exports = { loadNotes, saveNotes, loadSettings, saveSettings, loadReviews, saveReviews, loadReviewHistory, saveReviewHistory };
+// ---- 回收站（软删除的笔记，整体保留含 summary；可恢复或彻底删除） ----
+function loadTrash() {
+  const d = loadJSON('trash.json', { trash: [] });
+  return Array.isArray(d.trash) ? d.trash : [];
+}
+function saveTrash(trash) {
+  saveJSON('trash.json', { trash });
+}
+
+module.exports = { loadNotes, saveNotes, loadSettings, saveSettings, loadReviews, saveReviews, loadReviewHistory, saveReviewHistory, loadTrash, saveTrash };

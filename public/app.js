@@ -224,13 +224,12 @@ const state = {
   formCache: { baseURL: '', model: '' },
 
   // 复盘历史记录（设置 → 复盘历史记录 Tab）
-  history: null,       // 历史列表 [{...}]
+  history: null,       // 历史列表 [{id, noteTitle, total, correct, partial, wrong, accuracy, finishedAt, ...}]
   historyDetail: null, // 当前查看的详情记录
   historyLoaded: false,// 历史是否已加载（懒加载标记）
 
-  // 复盘历史记录（设置 → 复盘历史记录 Tab）
-  history: null,       // 历史列表 [{id, noteTitle, total, correct, partial, wrong, accuracy, finishedAt, ...}]
-  historyDetail: null, // 当前查看的详情记录
+  // 回收站（设置 → 回收站 Tab）
+  trash: null,         // 回收站列表 [{id, title, deletedAt, summary, ...}]
 
   // 编辑器视图状态
   previewScroll: 0,    // 渲染层滚动位置记忆（保留字段，兼容旧引用）
@@ -715,7 +714,7 @@ async function createNote() {
 
 async function deleteNote(id) {
   if (state.review) { toast('复盘进行中，请先结束复盘', 'info'); return; }
-  const ok = await confirmDialog('删除这条笔记？删除后不可恢复。', '删除');
+  const ok = await confirmDialog('删除这条笔记？笔记将移入回收站，可随时恢复（AI 总结一并保留）。', '删除');
   if (!ok) return;
   try {
     await api('/api/notes/' + id, { method: 'DELETE' });
@@ -1646,9 +1645,10 @@ function closeSettings() {
   $('#settingsModal').classList.add('hidden');
   state.clearKey = false;
   $('#apiKeyInput').value = '';
-  // 关闭时重置历史视图状态，下次打开重新从 API Tab 开始
+  // 关闭时重置各 Tab 视图状态，下次打开重新从 API Tab 开始
   state.history = null;
   state.historyDetail = null;
+  state.trash = null;
   $('#historyDetail').classList.add('hidden');
   $('#historyList').classList.remove('hidden');
 }
@@ -1663,15 +1663,18 @@ function switchSettingsTab(tab) {
     b.setAttribute('aria-selected', String(active));
   });
   $('#apiSettingsPanel').classList.toggle('hidden', !isApi);
-  $('#historyPanel').classList.toggle('hidden', isApi);
-  // footer 按钮：API Tab 显示 取消/测试连接/保存；历史 Tab 只保留 取消（关闭弹窗）
+  $('#historyPanel').classList.toggle('hidden', tab !== 'history');
+  $('#trashPanel').classList.toggle('hidden', tab !== 'trash');
+  // footer 按钮：仅 API Tab 显示 测试连接/保存；取消（关闭弹窗）始终可用
   $('#testConnBtn').classList.toggle('hidden', !isApi);
   $('#saveSettingsBtn').classList.toggle('hidden', !isApi);
   if (isApi) {
     $('#historyDetail').classList.add('hidden');
     $('#historyList').classList.remove('hidden');
-  } else {
+  } else if (tab === 'history') {
     loadReviewHistory(); // 切到历史 Tab 时懒加载列表
+  } else if (tab === 'trash') {
+    loadTrashItems(); // 切到回收站 Tab 时懒加载列表
   }
 }
 
@@ -1773,6 +1776,105 @@ function showHistoryList() {
   state.historyDetail = null;
   $('#historyDetail').classList.add('hidden');
   $('#historyList').classList.remove('hidden');
+}
+
+/* ================= 回收站（设置 → 回收站 Tab） ================= */
+
+let trashSeq = 0; // 回收站列表渲染序列号（防异步竞态）
+
+async function loadTrashItems() {
+  const listEl = $('#trashList');
+  const seq = ++trashSeq;
+  listEl.innerHTML = '<div class="trash-empty">加载中…</div>';
+  try {
+    const data = await api('/api/trash');
+    if (seq !== trashSeq) return;
+    state.trash = data.trash || [];
+    renderTrashList();
+  } catch (e) {
+    if (seq !== trashSeq) return;
+    listEl.innerHTML = '<div class="trash-empty">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function renderTrashList() {
+  const listEl = $('#trashList');
+  const items = state.trash || [];
+  $('#trashCount').textContent = items.length ? '共 ' + items.length + ' 篇笔记' : '';
+  $('#trashClearBtn').classList.toggle('hidden', !items.length);
+  if (!items.length) {
+    listEl.innerHTML = '<div class="trash-empty">回收站是空的<br>删除的笔记会先放到这里，可随时恢复（AI 总结一并保留）</div>';
+    return;
+  }
+  listEl.innerHTML = items.map((n, i) => {
+    const d = new Date(n.deletedAt);
+    const timeStr = isNaN(d.getTime()) ? '' : d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    const hasSummary = !!(n.summary && n.summary.trim());
+    return '<div class="trash-item">' +
+      '<div class="trash-item-main">' +
+        '<div class="trash-item-title">' + esc(n.title || '无标题笔记') +
+          (hasSummary ? ' <span class="trash-summary-badge">已总结</span>' : '') + '</div>' +
+        '<div class="trash-item-time">删除于 ' + esc(timeStr) + '</div>' +
+      '</div>' +
+      '<div class="trash-item-actions">' +
+        '<button type="button" class="btn trash-restore" data-idx="' + i + '">恢复</button>' +
+        '<button type="button" class="btn danger-ghost trash-purge" data-idx="' + i + '">彻底删除</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+  $$('.trash-restore', listEl).forEach((b) => b.addEventListener('click', () => restoreTrashItem(parseInt(b.dataset.idx, 10))));
+  $$('.trash-purge', listEl).forEach((b) => b.addEventListener('click', () => purgeTrashItem(parseInt(b.dataset.idx, 10))));
+}
+
+async function restoreTrashItem(idx) {
+  const items = state.trash || [];
+  const n = items[idx];
+  if (!n) return;
+  try {
+    const data = await api('/api/trash/' + n.id + '/restore', { method: 'POST' });
+    state.trash = items.filter((x) => x.id !== n.id);
+    renderTrashList();
+    // 恢复的笔记加入本地列表（不整表重拉，避免切走当前笔记）；summary 随笔记一并恢复
+    const restored = (data && data.note) || n;
+    if (!getNote(restored.id)) state.notes.push(restored);
+    sortNotes();
+    renderNoteList();
+    renderTags();
+    toast('已恢复「' + (restored.title || '无标题') + '」', 'success', 1600);
+  } catch (e) {
+    toast('恢复失败：' + e.message, 'error');
+  }
+}
+
+async function purgeTrashItem(idx) {
+  const items = state.trash || [];
+  const n = items[idx];
+  if (!n) return;
+  const ok = await confirmDialog('彻底删除「' + (n.title || '无标题') + '」？删除后不可恢复（包括 AI 总结）。', '彻底删除');
+  if (!ok) return;
+  try {
+    await api('/api/trash/' + n.id, { method: 'DELETE' });
+    state.trash = items.filter((x) => x.id !== n.id);
+    renderTrashList();
+    toast('已彻底删除', 'success', 1400);
+  } catch (e) {
+    toast('删除失败：' + e.message, 'error');
+  }
+}
+
+async function clearTrash() {
+  const items = state.trash || [];
+  if (!items.length) return;
+  const ok = await confirmDialog('清空回收站？共 ' + items.length + ' 篇笔记将被彻底删除，不可恢复（包括 AI 总结）。', '清空');
+  if (!ok) return;
+  try {
+    await api('/api/trash/clear', { method: 'POST' });
+    state.trash = [];
+    renderTrashList();
+    toast('回收站已清空', 'success', 1400);
+  } catch (e) {
+    toast('清空失败：' + e.message, 'error');
+  }
 }
 
 function onProviderChange() {
@@ -2070,15 +2172,11 @@ function bindEvents() {
   $('#saveSettingsBtn').addEventListener('click', saveSettings);
   $('#testConnBtn').addEventListener('click', testConnection);
 
-  // 设置 Tab 切换 + 复盘历史记录
+  // 设置 Tab 切换 + 复盘历史记录 + 回收站
   $$('.settings-tab').forEach((b) => b.addEventListener('click', () => switchSettingsTab(b.dataset.tab)));
   $('#historyBackBtn').addEventListener('click', showHistoryList);
   $('#historyDeleteBtn').addEventListener('click', deleteHistoryItem);
-
-  // 设置 Tab 切换 + 复盘历史记录
-  $$('.settings-tab').forEach((b) => b.addEventListener('click', () => switchSettingsTab(b.dataset.tab)));
-  $('#historyBackBtn').addEventListener('click', showHistoryList);
-  $('#historyDeleteBtn').addEventListener('click', deleteHistoryItem);
+  $('#trashClearBtn').addEventListener('click', clearTrash);
   $('#clearKeyBtn').addEventListener('click', () => {
     state.clearKey = true;
     $('#apiKeyInput').value = '';

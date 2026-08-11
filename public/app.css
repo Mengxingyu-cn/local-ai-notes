@@ -963,6 +963,56 @@ body.sidebar-resizing { cursor: col-resize; user-select: none; }
 .history-suggestions { padding-left: 20px; line-height: 1.85; font-size: 13px; }
 .history-detail-actions { margin-top: 16px; display: flex; justify-content: flex-end; }
 
+/* 回收站 */
+.trash-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.trash-count { font-size: 12px; color: var(--text-2); }
+.trash-list { min-height: 120px; max-height: 52vh; overflow-y: auto; }
+.trash-empty {
+  padding: 40px 12px;
+  text-align: center;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.9;
+}
+.trash-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 11px 14px;
+  margin-bottom: 8px;
+  background: #fff;
+}
+.trash-item-main { flex: 1; min-width: 0; }
+.trash-item-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.trash-summary-badge {
+  display: inline-block;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 8px;
+  margin-left: 6px;
+  vertical-align: 1px;
+}
+.trash-item-time { font-size: 11.5px; color: var(--text-2); margin-top: 4px; }
+.trash-item-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.trash-item-actions .btn { padding: 5px 11px; font-size: 12px; }
+
 .modal-header {
   display: flex;
   justify-content: space-between;
