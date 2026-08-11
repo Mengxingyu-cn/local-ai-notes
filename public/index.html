@@ -205,27 +205,46 @@
 
 <!-- ============ 设置模态 ============ -->
 <div id="settingsModal" class="modal-overlay hidden">
-  <div class="modal">
+  <div class="modal modal-wide">
     <div class="modal-header">
       <h2>设置</h2>
-      <button id="closeSettingsBtn" class="icon-btn" type="button" title="关闭">✕</button>
+      <button id="closeSettingsBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">✕</button>
+    </div>
+    <div class="settings-tabs" role="tablist">
+      <button type="button" class="settings-tab active" data-tab="api" role="tab" aria-selected="true">🔌 API 设置</button>
+      <button type="button" class="settings-tab" data-tab="history" role="tab" aria-selected="false">📚 复盘历史记录</button>
     </div>
     <div class="modal-body">
-      <label for="providerSelect">AI 提供商</label>
-      <select id="providerSelect"></select>
+      <!-- API 设置面板 -->
+      <div id="apiSettingsPanel" class="settings-panel">
+        <label for="providerSelect">AI 提供商</label>
+        <select id="providerSelect"></select>
 
-      <label for="baseURLInput">Base URL</label>
-      <input id="baseURLInput" type="text" placeholder="https://api.openai.com/v1" autocomplete="off">
+        <label for="baseURLInput">Base URL</label>
+        <input id="baseURLInput" type="text" placeholder="https://api.openai.com/v1" autocomplete="off">
 
-      <label for="modelInput">Model</label>
-      <input id="modelInput" type="text" placeholder="gpt-4o-mini" autocomplete="off">
+        <label for="modelInput">Model</label>
+        <input id="modelInput" type="text" placeholder="gpt-4o-mini" autocomplete="off">
 
-      <label for="apiKeyInput">API Key</label>
-      <div class="api-key-row">
-        <input id="apiKeyInput" type="password" placeholder="sk-…" autocomplete="off">
-        <button id="clearKeyBtn" class="btn danger-ghost hidden" type="button">清除</button>
+        <label for="apiKeyInput">API Key</label>
+        <div class="api-key-row">
+          <input id="apiKeyInput" type="password" placeholder="sk-…" autocomplete="off">
+          <button id="clearKeyBtn" class="btn danger-ghost hidden" type="button">清除</button>
+        </div>
+        <p class="hint">API Key 仅保存在本地配置中，不会上传到云端。清除后需要重新填写。</p>
       </div>
-      <p class="hint">API Key 仅保存在本地配置中，不会上传到云端。清除后需要重新填写。</p>
+
+      <!-- 复盘历史记录面板 -->
+      <div id="historyPanel" class="settings-panel hidden">
+        <div id="historyList" class="history-list"></div>
+        <div id="historyDetail" class="history-detail hidden">
+          <button id="historyBackBtn" class="link-btn" type="button">← 返回列表</button>
+          <div id="historyDetailBody"></div>
+          <div class="history-detail-actions">
+            <button id="historyDeleteBtn" class="btn danger" type="button">🗑 删除此记录</button>
+          </div>
+        </div>
+      </div>
     </div>
     <div class="modal-footer">
       <button id="cancelSettingsBtn" class="btn" type="button">取消</button>

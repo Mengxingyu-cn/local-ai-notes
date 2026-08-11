@@ -223,6 +223,15 @@ const state = {
   lastProvider: '',    // 设置页上一次选中的 provider（custom 表单缓存用）
   formCache: { baseURL: '', model: '' },
 
+  // 复盘历史记录（设置 → 复盘历史记录 Tab）
+  history: null,       // 历史列表 [{...}]
+  historyDetail: null, // 当前查看的详情记录
+  historyLoaded: false,// 历史是否已加载（懒加载标记）
+
+  // 复盘历史记录（设置 → 复盘历史记录 Tab）
+  history: null,       // 历史列表 [{id, noteTitle, total, correct, partial, wrong, accuracy, finishedAt, ...}]
+  historyDetail: null, // 当前查看的详情记录
+
   // 编辑器视图状态
   previewScroll: 0,    // 渲染层滚动位置记忆（保留字段，兼容旧引用）
   toc: [],             // 当前笔记目录（{level,text,off}[]）
@@ -1261,19 +1270,30 @@ function toolbarInsert(md) {
   if (!rule) return;
 
   // 行级语法：光标所在行行首插入（若已存在该标记则移除，形成开关）
+  // 标题切换：已有其他级别标题时，替换为新级别（而非叠加成 ## # 1）
   if (rule.line !== undefined) {
     const lineStart = v.lastIndexOf('\n', start - 1) + 1;
     const lineEnd = v.indexOf('\n', end);
     const lineEndPos = lineEnd === -1 ? v.length : lineEnd;
-    const line = v.slice(lineStart, lineEndPos);
+    let line = v.slice(lineStart, lineEndPos);
     const marker = rule.line;
-    if (line.startsWith(marker)) {
-      ta.value = v.slice(0, lineStart) + line.slice(marker.length) + v.slice(lineEndPos);
-      ta.setSelectionRange(lineStart, lineStart + Math.max(0, line.length - marker.length));
+    // 标题级别切换：先剥离已有标题标记（任意级别），再判断是否与新标记相同
+    if (/^#{1,6}\s/.test(marker) && /^#{1,6}\s/.test(line)) {
+      const stripped = line.replace(/^#{1,6}\s/, '');
+      if (line.startsWith(marker)) {
+        // 同级别：移除标记（关闭标题）
+        line = stripped;
+      } else {
+        // 不同级别：替换为新的标题标记
+        line = marker + stripped;
+      }
+    } else if (line.startsWith(marker)) {
+      line = line.slice(marker.length);
     } else {
-      ta.value = v.slice(0, lineStart) + marker + line + v.slice(lineEndPos);
-      ta.setSelectionRange(lineStart + marker.length, lineEndPos + marker.length);
+      line = marker + line;
     }
+    ta.value = v.slice(0, lineStart) + line + v.slice(lineEndPos);
+    ta.setSelectionRange(lineStart, lineStart + line.length);
     lastEditOffset = ta.selectionStart;
     lastEditEnd = ta.selectionEnd;
     ta.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1541,6 +1561,7 @@ async function openSettings() {
   state.clearKey = false;
   $('#clearKeyBtn').disabled = false;
   $('#settingsModal').classList.remove('hidden');
+  switchSettingsTab('api'); // 每次打开默认回到 API 设置 Tab
 
   const saveBtn = $('#saveSettingsBtn');
   saveBtn.disabled = true;
@@ -1585,6 +1606,133 @@ function closeSettings() {
   $('#settingsModal').classList.add('hidden');
   state.clearKey = false;
   $('#apiKeyInput').value = '';
+  // 关闭时重置历史视图状态，下次打开重新从 API Tab 开始
+  state.history = null;
+  state.historyDetail = null;
+  $('#historyDetail').classList.add('hidden');
+  $('#historyList').classList.remove('hidden');
+}
+
+/* ================= 设置 Tab 切换（API 设置 / 复盘历史记录） ================= */
+
+function switchSettingsTab(tab) {
+  const isApi = tab === 'api';
+  $$('.settings-tab').forEach((b) => {
+    const active = b.dataset.tab === tab;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-selected', String(active));
+  });
+  $('#apiSettingsPanel').classList.toggle('hidden', !isApi);
+  $('#historyPanel').classList.toggle('hidden', isApi);
+  // footer 按钮：API Tab 显示 取消/测试连接/保存；历史 Tab 只保留 取消（关闭弹窗）
+  $('#testConnBtn').classList.toggle('hidden', !isApi);
+  $('#saveSettingsBtn').classList.toggle('hidden', !isApi);
+  if (isApi) {
+    $('#historyDetail').classList.add('hidden');
+    $('#historyList').classList.remove('hidden');
+  } else {
+    loadReviewHistory(); // 切到历史 Tab 时懒加载列表
+  }
+}
+
+/* ================= 复盘历史记录 ================= */
+
+let historyRenderSeq = 0; // 历史列表渲染序列号（防异步竞态：旧响应不覆盖新列表）
+
+async function loadReviewHistory() {
+  const listEl = $('#historyList');
+  const seq = ++historyRenderSeq;
+  listEl.innerHTML = '<div class="history-empty">加载中…</div>';
+  try {
+    const data = await api('/api/review-history');
+    if (seq !== historyRenderSeq) return; // 已被更新的请求覆盖
+    state.history = data.history || [];
+    renderHistoryList();
+  } catch (e) {
+    if (seq !== historyRenderSeq) return;
+    listEl.innerHTML = '<div class="history-empty">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function renderHistoryList() {
+  const listEl = $('#historyList');
+  const items = state.history || [];
+  if (!items.length) {
+    listEl.innerHTML = '<div class="history-empty">暂无复盘记录<br>完成一次复盘后，报告会自动保存在这里</div>';
+    return;
+  }
+  listEl.innerHTML = items.map((h, i) => {
+    const d = new Date(h.finishedAt);
+    const timeStr = isNaN(d.getTime()) ? '' : d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    const accCls = h.accuracy >= 80 ? 'good' : (h.accuracy >= 50 ? 'mid' : 'bad');
+    return '<button type="button" class="history-item" data-idx="' + i + '">' +
+      '<div class="history-item-head">' +
+        '<span class="history-item-title">' + esc(h.noteTitle || '无标题笔记') + '</span>' +
+        '<span class="history-item-time">' + esc(timeStr) + '</span>' +
+      '</div>' +
+      '<div class="history-item-meta">共 ' + (h.total || 0) + ' 题 · 对 ' + (h.correct || 0) + ' · 部分对 ' + (h.partial || 0) + ' · 错 ' + (h.wrong || 0) + '</div>' +
+      '<div class="history-item-acc ' + accCls + '">正确率 ' + (h.accuracy || 0) + '%</div>' +
+    '</button>';
+  }).join('');
+  $$('.history-item', listEl).forEach((b) => {
+    b.addEventListener('click', () => showHistoryDetail(parseInt(b.dataset.idx, 10)));
+  });
+}
+
+function showHistoryDetail(idx) {
+  const items = state.history || [];
+  const h = items[idx];
+  if (!h) return;
+  state.historyDetail = h;
+  $('#historyList').classList.add('hidden');
+  $('#historyDetail').classList.remove('hidden');
+
+  const accCls = h.accuracy >= 80 ? 'good' : (h.accuracy >= 50 ? 'mid' : 'bad');
+  const weak = Array.isArray(h.weakTopics) ? h.weakTopics : [];
+  const sug = Array.isArray(h.suggestions) ? h.suggestions : [];
+  const d = new Date(h.finishedAt);
+  const timeStr = isNaN(d.getTime()) ? '' : d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+
+  $('#historyDetailBody').innerHTML =
+    '<div class="history-detail-title">' + esc(h.noteTitle || '无标题笔记') + '</div>' +
+    '<div class="history-detail-time">' + esc(timeStr) + '</div>' +
+    '<div class="history-stats">' +
+      '<div class="history-stat"><span class="num">' + (h.total || 0) + '</span><span class="lbl">总题数</span></div>' +
+      '<div class="history-stat good"><span class="num">' + (h.correct || 0) + '</span><span class="lbl">✅ 正确</span></div>' +
+      '<div class="history-stat partial"><span class="num">' + (h.partial || 0) + '</span><span class="lbl">⚠️ 部分</span></div>' +
+      '<div class="history-stat bad"><span class="num">' + (h.wrong || 0) + '</span><span class="lbl">❌ 错误</span></div>' +
+      '<div class="history-stat ' + accCls + '"><span class="num">' + (h.accuracy || 0) + '%</span><span class="lbl">正确率</span></div>' +
+    '</div>' +
+    '<div class="history-section"><div class="history-section-title">薄弱点</div>' +
+      (weak.length ? weak.map((w) => '<div class="history-chip">' + esc(w) + '</div>').join('') : '<div class="muted">暂无薄弱点，继续保持！</div>') +
+    '</div>' +
+    '<div class="history-section"><div class="history-section-title">学习建议</div>' +
+      (sug.length ? '<ul class="history-suggestions">' + sug.map((s) => '<li>' + esc(s) + '</li>').join('') + '</ul>' : '<div class="muted">暂无建议</div>') +
+    '</div>';
+}
+
+async function deleteHistoryItem() {
+  const h = state.historyDetail;
+  if (!h) return;
+  const ok = await confirmDialog('删除这条复盘记录？删除后不可恢复。', '删除');
+  if (!ok) return;
+  try {
+    await api('/api/review-history/' + h.id, { method: 'DELETE' });
+    state.history = (state.history || []).filter((x) => x.id !== h.id);
+    toast('已删除', 'success', 1400);
+    state.historyDetail = null;
+    $('#historyDetail').classList.add('hidden');
+    $('#historyList').classList.remove('hidden');
+    renderHistoryList();
+  } catch (e) {
+    toast('删除失败：' + e.message, 'error');
+  }
+}
+
+function showHistoryList() {
+  state.historyDetail = null;
+  $('#historyDetail').classList.add('hidden');
+  $('#historyList').classList.remove('hidden');
 }
 
 function onProviderChange() {
@@ -1881,6 +2029,16 @@ function bindEvents() {
   $('#cancelSettingsBtn').addEventListener('click', closeSettings);
   $('#saveSettingsBtn').addEventListener('click', saveSettings);
   $('#testConnBtn').addEventListener('click', testConnection);
+
+  // 设置 Tab 切换 + 复盘历史记录
+  $$('.settings-tab').forEach((b) => b.addEventListener('click', () => switchSettingsTab(b.dataset.tab)));
+  $('#historyBackBtn').addEventListener('click', showHistoryList);
+  $('#historyDeleteBtn').addEventListener('click', deleteHistoryItem);
+
+  // 设置 Tab 切换 + 复盘历史记录
+  $$('.settings-tab').forEach((b) => b.addEventListener('click', () => switchSettingsTab(b.dataset.tab)));
+  $('#historyBackBtn').addEventListener('click', showHistoryList);
+  $('#historyDeleteBtn').addEventListener('click', deleteHistoryItem);
   $('#clearKeyBtn').addEventListener('click', () => {
     state.clearKey = true;
     $('#apiKeyInput').value = '';

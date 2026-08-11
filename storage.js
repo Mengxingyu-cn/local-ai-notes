@@ -68,4 +68,13 @@ function saveReviews(sessions) {
   saveJSON('reviews.json', { sessions });
 }
 
-module.exports = { loadNotes, saveNotes, loadSettings, saveSettings, loadReviews, saveReviews };
+// ---- 复盘历史记录（复盘结束后持久化保存的报告，供“设置 → 复盘历史记录”查看） ----
+function loadReviewHistory() {
+  const d = loadJSON('review-history.json', { history: [] });
+  return Array.isArray(d.history) ? d.history : [];
+}
+function saveReviewHistory(history) {
+  saveJSON('review-history.json', { history });
+}
+
+module.exports = { loadNotes, saveNotes, loadSettings, saveSettings, loadReviews, saveReviews, loadReviewHistory, saveReviewHistory };

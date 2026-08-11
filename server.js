@@ -207,6 +207,32 @@ function handleNotes(req, res, segments) {
   return sendJSON(res, 405, { error: '方法不支持' });
 }
 
+// ---------- 复盘历史路由 ----------
+function handleReviewHistory(req, res, segments) {
+  // /api/review-history
+  if (segments.length === 0) {
+    if (req.method === 'GET') {
+      return ok(res, { history: storage.loadReviewHistory() });
+    }
+    return sendJSON(res, 405, { error: '方法不支持' });
+  }
+
+  // /api/review-history/:id
+  const id = safeDecode(segments[0]);
+  if (id === null) return sendJSON(res, 400, { error: '无效的记录 ID' });
+  const history = storage.loadReviewHistory();
+  const idx = history.findIndex((h) => h.id === id);
+  if (idx < 0) return sendJSON(res, 404, { error: '记录不存在' });
+
+  if (req.method === 'GET') return ok(res, { record: history[idx] });
+  if (req.method === 'DELETE') {
+    history.splice(idx, 1);
+    storage.saveReviewHistory(history);
+    return ok(res, { ok: true });
+  }
+  return sendJSON(res, 405, { error: '方法不支持' });
+}
+
 // ---------- 设置路由 ----------
 function handleSettings(req, res) {
   if (req.method === 'GET') {
@@ -328,6 +354,10 @@ const server = http.createServer((req, res) => {
   }
   if (pathname === '/api/settings') {
     return handleSettings(req, res);
+  }
+  if (pathname === '/api/review-history' || pathname.startsWith('/api/review-history/')) {
+    const segments = pathname.slice('/api/review-history/'.length).split('/').filter(Boolean);
+    return handleReviewHistory(req, res, segments);
   }
   if (pathname.startsWith('/api/ai/')) {
     const segments = pathname.slice('/api/ai/'.length).split('/').filter(Boolean);

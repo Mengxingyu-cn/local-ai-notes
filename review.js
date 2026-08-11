@@ -3,7 +3,7 @@
 'use strict';
 const crypto = require('crypto');
 const { callChatCompletion } = require('./ai');
-const { loadNotes, loadReviews, saveReviews } = require('./storage');
+const { loadNotes, loadReviews, saveReviews, loadReviewHistory, saveReviewHistory } = require('./storage');
 
 const MAX_QUESTIONS = 8;      // 一轮复盘默认题数
 const MAX_NOTE_CHARS = 12000; // 笔记上下文截断，防超长
@@ -270,6 +270,19 @@ async function endReview(settings, sessionId) {
     noteTitle: session.noteTitle,
     finishedAt: Date.now(),
   };
+
+  // 持久化到复盘历史（设置 → 复盘历史记录 可查看）；带 id 与笔记关联
+  try {
+    const historyEntry = Object.assign({ id: crypto.randomBytes(8).toString('hex'), noteId: session.noteId }, report);
+    const history = loadReviewHistory();
+    history.unshift(historyEntry); // 最新在前
+    if (history.length > 200) history.length = 200; // 条数上限，防无限增长
+    saveReviewHistory(history);
+    report.historyId = historyEntry.id;
+  } catch (e) {
+    // 历史保存失败不阻塞报告返回（复盘主流程优先）
+    console.error('[review] 保存复盘历史失败:', e.message);
+  }
 
   delete sessions[sessionId]; // 复盘完即归档
   persist(sessions);
