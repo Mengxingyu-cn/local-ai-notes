@@ -341,7 +341,7 @@ async function summarizeNote(settings, noteId) {
     { role: 'system', content: buildSummaryPrompt(notes[idx].content || '') },
     { role: 'user', content: '请总结这篇笔记。' },
   ], 0.3);
-  const summary = raw.trim();
+  const summary = raw.trim().slice(0, 20000); // 长度上限，防超长输出膨胀 notes.json
   // AI 调用耗时较长，期间用户可能编辑了笔记：写回前重新加载，只更新 summary 字段，避免覆盖用户最新编辑
   const fresh = loadNotes();
   const fi = fresh.findIndex((n) => n.id === noteId);
