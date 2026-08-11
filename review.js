@@ -3,7 +3,7 @@
 'use strict';
 const crypto = require('crypto');
 const { callChatCompletion } = require('./ai');
-const { loadNotes, loadReviews, saveReviews, loadReviewHistory, saveReviewHistory } = require('./storage');
+const { loadNotes, saveNotes, loadReviews, saveReviews, loadReviewHistory, saveReviewHistory } = require('./storage');
 
 const MAX_QUESTIONS = 8;      // 一轮复盘默认题数
 const MAX_NOTE_CHARS = 12000; // 笔记上下文截断，防超长
