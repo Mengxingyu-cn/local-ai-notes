@@ -610,6 +610,17 @@ function fillEditor(note) {
   updateSaveStatus();
   renderQuickTags(); // 切换笔记后刷新快捷标签选中态
   toggleToc(false);   // 切换笔记后收起目录面板
+  // 已有 AI 总结：直接展示；无总结则隐藏面板
+  if (note.summary) {
+    $('#summaryPanel').classList.remove('hidden');
+    $('#summaryToggle').textContent = '收起';
+    $('#summaryBody').classList.remove('hidden');
+    $('#summaryBody').innerHTML = renderMarkdown(note.summary);
+    $('#summarizeBtn').textContent = '🔄 重新总结';
+  } else {
+    hideSummary();
+    $('#summarizeBtn').textContent = '✨ AI 总结';
+  }
 }
 
 /* ================= 自动保存（1s 防抖） ================= */
@@ -1336,6 +1347,15 @@ function toolbarInsert(md) {
 async function summarize() {
   const note = getNote(state.currentId);
   if (!note) return;
+  if (!note.content || !note.content.trim()) { toast('这条笔记还没有内容，先写点东西吧', 'info'); return; }
+  // 已有总结：确认是否重新生成（不打断用户，确认后才继续）
+  if (note.summary) {
+    const ok = await confirmDialog('此笔记已经总结，是否重新生成总结？', '重新生成');
+    if (!ok) return;
+  }
+  await flushSave(); // 冲刷防抖窗口内的输入，确保总结基于最新内容（后端按保存后的内容总结）
+  const targetId = state.currentId;
+  const prevSummary = note.summary || '';
   const btn = $('#summarizeBtn');
   btn.disabled = true;
   btn.textContent = '⏳ 总结中…';
@@ -1344,13 +1364,23 @@ async function summarize() {
   $('#summaryToggle').textContent = '收起';
   $('#summaryBody').innerHTML = '<div class="loading-dots"><span></span><span></span><span></span></div>';
   try {
-    const data = await api('/api/ai/summarize', { method: 'POST', body: { noteId: state.currentId } });
+    const data = await api('/api/ai/summarize', { method: 'POST', body: { noteId: targetId } });
+    note.summary = data.summary || ''; // 同步本地状态（后端已持久化）
+    if (state.currentId !== targetId) return; // 总结期间切走了笔记，不污染当前面板
     $('#summaryBody').innerHTML = renderMarkdown(data.summary || '（没有返回内容）');
   } catch (e) {
-    $('#summaryBody').innerHTML = '<div class="error-box">总结失败：' + esc(e.message) + '</div>';
+    if (state.currentId !== targetId) return;
+    // 生成失败：恢复旧总结（如有），避免 loading/错误态覆盖已保存内容
+    if (prevSummary) {
+      $('#summaryBody').innerHTML = renderMarkdown(prevSummary);
+      $('#summaryBody').classList.remove('hidden');
+      $('#summaryToggle').textContent = '收起';
+    } else {
+      $('#summaryBody').innerHTML = '<div class="error-box">总结失败：' + esc(e.message) + '</div>';
+    }
   } finally {
     btn.disabled = false;
-    btn.textContent = '✨ AI 总结';
+    btn.textContent = note.summary ? '🔄 重新总结' : '✨ AI 总结';
   }
 }
 
@@ -1359,15 +1389,23 @@ async function summarize() {
    状态全部集中在 state.review，视图是它的投影。 */
 
 async function startReview() {
-  const note = getNote(state.currentId);
-  if (!note) { toast('请先选择一条笔记', 'info'); return; }
-  if (!note.content || !note.content.trim()) { toast('这条笔记还没有内容，先写点东西吧', 'info'); return; }
+  // 按标签组复盘：当前选中的标签（"全部"时提示先选标签组）
+  const tag = state.activeTag === '全部' ? '' : state.activeTag;
+  if (!tag) {
+    toast('请先在侧边栏选择一个标签组，再开始复盘', 'info');
+    return;
+  }
+  const groupNotes = state.notes.filter((n) => (n.tags || []).includes(tag));
+  if (!groupNotes.length) { toast('该标签组下没有笔记', 'info'); return; }
+  const ok = await confirmDialog('即将对标签组「' + tag + '」进行复盘（共 ' + groupNotes.length + ' 篇笔记），是否开始？', '开始复盘');
+  if (!ok) return;
+  await flushSave(); // 冲刷防抖窗口内的输入，确保复盘基于最新笔记内容
 
   const btn = $('#reviewBtn');
   btn.disabled = true;
   btn.textContent = '⏳ 准备中…';
   try {
-    const data = await api('/api/ai/review/start', { method: 'POST', body: { noteId: state.currentId } });
+    const data = await api('/api/ai/review/start', { method: 'POST', body: { tag } });
     state.review = {
       sessionId: data.sessionId,
       question: data.question,
@@ -1377,6 +1415,7 @@ async function startReview() {
       done: false,
       nextQuestion: null,
       verdict: null,
+      noteTitle: data.noteTitle || (getNote(state.currentId) || {}).title || '',
     };
     state.report = null;
     openReviewView();
@@ -1397,7 +1436,8 @@ function openReviewView() {
   $('#summarizeBtn').disabled = true;
   $('#reviewBtn').disabled = true;
   const note = getNote(state.currentId);
-  $('#reviewNoteTitle').textContent = note ? '「' + (note.title || '无标题') + '」' : '';
+  const title = (state.review && state.review.noteTitle) || (note ? note.title : '') || '';
+  $('#reviewNoteTitle').textContent = title ? '「' + title + '」' : '';
   renderReviewQuestion();
 }
 

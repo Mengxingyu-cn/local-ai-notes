@@ -315,8 +315,8 @@ async function handleAI(req, res, segments) {
       return ok(res, { summary });
     }
     if (action === 'review/start') {
-      if (!body.noteId) throw Object.assign(new Error('缺少 noteId'), { statusCode: 400 });
-      return ok(res, await review.startReview(settings, body.noteId));
+      if (!body.noteId && !body.tag) throw Object.assign(new Error('缺少 noteId 或 tag'), { statusCode: 400 });
+      return ok(res, await review.startReview(settings, body));
     }
     if (action === 'review/answer') {
       if (!body.sessionId) throw Object.assign(new Error('缺少 sessionId'), { statusCode: 400 });

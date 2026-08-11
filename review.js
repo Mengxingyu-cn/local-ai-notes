@@ -9,9 +9,9 @@ const MAX_QUESTIONS = 8;      // 一轮复盘默认题数
 const MAX_NOTE_CHARS = 12000; // 笔记上下文截断，防超长
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 复盘会话 24 小时过期
 
-function buildSystemPrompt(noteContent) {
-  const content = noteContent.length > MAX_NOTE_CHARS
-    ? noteContent.slice(0, MAX_NOTE_CHARS) + '\n\n（笔记过长，已截断）'
+function buildSystemPrompt(noteContent, maxChars = MAX_NOTE_CHARS) {
+  const content = noteContent.length > maxChars
+    ? noteContent.slice(0, maxChars) + '\n\n（笔记过长，已截断）'
     : noteContent;
   return [
     '你是一位严格的复习考官，任务是基于用户笔记进行提问式复盘。',
@@ -133,20 +133,63 @@ async function callAI(settings, messages, temperature = 0.3) {
 }
 
 // 开始复盘：建会话并出第一题
-async function startReview(settings, noteId) {
-  const note = noteById(noteId);
-  if (!note) throw Object.assign(new Error('笔记不存在'), { statusCode: 404 });
+// 支持两种方式：单篇笔记（noteId）或标签组聚合（tag，取该标签下所有笔记内容）
+async function startReview(settings, opts) {
+  const { noteId, tag } = opts || {};
+  let content = '';
+  let sessionNoteId = null;
+  let sessionNoteTitle = '';
+
+  if (tag) {
+    const notes = loadNotes()
+      .filter((n) => (n.tags || []).includes(tag))
+      .sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0)); // 按时间正序，保持知识递进
+    if (!notes.length) throw Object.assign(new Error('该标签组下没有笔记'), { statusCode: 404 });
+    sessionNoteId = 'tag:' + tag;
+    sessionNoteTitle = '标签组：' + tag;
+    // 聚合预算：标签组总预算 24000，按篇均分；单篇上限 8000，防止一篇巨文独占预算
+    const GROUP_MAX = MAX_NOTE_CHARS * 2;
+    const perNote = Math.max(2000, Math.min(8000, Math.floor(GROUP_MAX / notes.length)));
+    let used = 0;
+    let included = 0;
+    const parts = [];
+    for (const n of notes) {
+      if (used >= GROUP_MAX) break;
+      const budget = Math.min(perNote, GROUP_MAX - used);
+      const body = String(n.content || '');
+      const sliced = body.length > budget ? body.slice(0, budget) + '\n\n（此笔记过长，已截断）' : body;
+      if (!sliced.trim()) continue; // 空内容笔记不占预算
+      parts.push(`## 笔记：《${n.title || '无标题'}》\n\n${sliced}`);
+      used += sliced.length;
+      included++;
+    }
+    if (!parts.length) throw Object.assign(new Error('该标签组下笔记内容为空，请先写入内容'), { statusCode: 400 });
+    if (included < notes.length) {
+      parts.push(`\n\n（本组共 ${notes.length} 篇笔记，已纳入 ${included} 篇，其余因内容过长未纳入）`);
+    }
+    content = parts.join('\n\n---\n\n');
+  } else if (noteId) {
+    const note = noteById(noteId);
+    if (!note) throw Object.assign(new Error('笔记不存在'), { statusCode: 404 });
+    sessionNoteId = noteId;
+    sessionNoteTitle = note.title;
+    content = note.content || '';
+  } else {
+    throw Object.assign(new Error('缺少 noteId 或 tag'), { statusCode: 400 });
+  }
+  if (!content.trim()) throw Object.assign(new Error('复盘内容为空，请先写入笔记内容'), { statusCode: 400 });
+
   const sessions = getSessions();
   const session = {
     id: newSessionId(),
-    noteId,
-    noteTitle: note.title,
+    noteId: sessionNoteId,
+    noteTitle: sessionNoteTitle,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     askedCount: 0,
     stats: { yes: 0, partial: 0, no: 0 },
     history: [
-      { role: 'system', content: buildSystemPrompt(note.content || '') },
+      { role: 'system', content: buildSystemPrompt(content, tag ? MAX_NOTE_CHARS * 2 : MAX_NOTE_CHARS) },
     ],
   };
   const raw = await callAI(settings, [
@@ -159,7 +202,7 @@ async function startReview(settings, noteId) {
   session.history.push({ role: 'assistant', content: `【问题】${question}` });
   sessions[session.id] = session;
   persist(sessions);
-  return { sessionId: session.id, question, asked: session.askedCount, total: MAX_QUESTIONS };
+  return { sessionId: session.id, question, asked: session.askedCount, total: MAX_QUESTIONS, noteTitle: sessionNoteTitle };
 }
 
 // 提交回答：评判 + 出下一题
@@ -289,15 +332,24 @@ async function endReview(settings, sessionId) {
   return report;
 }
 
-// AI 总结
+// AI 总结（生成后自动保存到笔记的 summary 字段，供下次查看/重新生成判断）
 async function summarizeNote(settings, noteId) {
-  const note = noteById(noteId);
-  if (!note) throw Object.assign(new Error('笔记不存在'), { statusCode: 404 });
+  const notes = loadNotes();
+  const idx = notes.findIndex((n) => n.id === noteId);
+  if (idx < 0) throw Object.assign(new Error('笔记不存在'), { statusCode: 404 });
   const raw = await callAI(settings, [
-    { role: 'system', content: buildSummaryPrompt(note.content || '') },
+    { role: 'system', content: buildSummaryPrompt(notes[idx].content || '') },
     { role: 'user', content: '请总结这篇笔记。' },
   ], 0.3);
-  return raw.trim();
+  const summary = raw.trim();
+  // AI 调用耗时较长，期间用户可能编辑了笔记：写回前重新加载，只更新 summary 字段，避免覆盖用户最新编辑
+  const fresh = loadNotes();
+  const fi = fresh.findIndex((n) => n.id === noteId);
+  if (fi < 0) throw Object.assign(new Error('笔记不存在或已被删除'), { statusCode: 404 });
+  fresh[fi].summary = summary;
+  fresh[fi].summarizedAt = Date.now();
+  saveNotes(fresh);
+  return summary;
 }
 
 module.exports = { startReview, answerReview, endReview, summarizeNote, MAX_QUESTIONS };
