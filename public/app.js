@@ -716,6 +716,7 @@ async function deleteNote(id) {
   if (state.review) { toast('复盘进行中，请先结束复盘', 'info'); return; }
   const ok = await confirmDialog('删除这条笔记？笔记将移入回收站，可随时恢复（AI 总结一并保留）。', '删除');
   if (!ok) return;
+  await flushSave(); // 冲刷防抖窗口内的输入，避免删除后 PUT 打在已删 id 上返回 404
   try {
     await api('/api/notes/' + id, { method: 'DELETE' });
     state.notes = state.notes.filter((n) => n.id !== id);
