@@ -957,7 +957,15 @@ function locateOffset(root, targetOffset) {
     } else if (tag === 'HR') {
       acc += 4; // '---' + '\n'
     } else if (tag === 'IMG') {
-      acc += 5 + (node.getAttribute('alt') || '').length + (node.getAttribute('src') || '').length; // 与 htmlToMarkdown 对称
+      const alt = node.getAttribute('alt') || '';
+      const src = node.getAttribute('src') || '';
+      const len = 5 + alt.length + src.length; // 与 htmlToMarkdown 对称
+      // 光标偏移落在图片语法区间内 → 命中图片元素本身（供渲染时替换为源码 span 编辑）
+      if (targetOffset >= acc && targetOffset <= acc + len) {
+        hit = { node, offset: 0 };
+        return;
+      }
+      acc += len;
     } else if (tag === 'PRE') {
       const lang = node.getAttribute && node.getAttribute('data-lang');
       acc += 4 + (lang ? lang.length : 0); // '```' + lang + '\n'
@@ -1005,6 +1013,7 @@ function inlineToSource(el) {
   if (tag === 'EM') return '*' + text + '*';
   if (tag === 'CODE') return '`' + text + '`';
   if (tag === 'A') return '[' + text + '](' + (el.getAttribute('href') || '') + ')';
+  if (tag === 'IMG') return '![' + (el.getAttribute('alt') || '') + '](' + (el.getAttribute('src') || '') + ')';
   return text;
 }
 
@@ -1055,15 +1064,19 @@ function renderEditFromTextarea(offset) {
             target.textContent = source; // textContent 自动转义，浏览器解码后是原始 markdown 字符
           }
         } else if (target.tagName === 'P') {
-          // 普通段落：保持渲染，仅光标所在的行内标记（strong/em/code/a）临时显示源码字符
+          // 普通段落：保持渲染，仅光标所在的行内标记（strong/em/code/a/img）临时显示源码字符
           const caretNode = locateOffset(tmp, Math.max(0, Math.min(offset, md.length)));
           if (caretNode && caretNode.node) {
             let el = caretNode.node.nodeType === Node.TEXT_NODE ? caretNode.node.parentElement : caretNode.node;
             while (el && el !== target) {
-              if (el.nodeType === Node.ELEMENT_NODE && ['STRONG', 'EM', 'CODE', 'A'].includes(el.tagName)) break;
+              if (el.nodeType === Node.ELEMENT_NODE &&
+                  (['STRONG', 'EM', 'CODE', 'A', 'IMG'].includes(el.tagName) ||
+                   el.classList.contains('md-inline-src'))) break;
               el = el.parentElement;
             }
-            if (el && el !== target && ['STRONG', 'EM', 'CODE', 'A'].includes(el.tagName)) {
+            if (el && el !== target &&
+                (['STRONG', 'EM', 'CODE', 'A', 'IMG'].includes(el.tagName) ||
+                 el.classList.contains('md-inline-src'))) {
               const span = document.createElement('span');
               span.className = 'md-inline-src';
               span.textContent = inlineToSource(el);
@@ -2169,9 +2182,31 @@ function bindEvents() {
   // 链接点击：普通点击放光标进链接文字（编辑）；Ctrl/Cmd+点击才打开新标签
   // 光标在链接内时链接会显示为 md-inline-src 源码 span（无 <a> 元素），需从源码文本解析 href
   $('#renderEdit').addEventListener('click', (e) => {
-    if (!e.metaKey && !e.ctrlKey) return;
     const t = e.target;
     if (!t || !t.closest) return;
+    // 普通点击图片：切换为源码编辑态（img 是空元素无法直接编辑 alt/src，显示 ![alt](url) 供修改）
+    if (!e.metaKey && !e.ctrlKey) {
+      const img = t.closest('img');
+      if (img) {
+        e.preventDefault();
+        const span = document.createElement('span');
+        span.className = 'md-inline-src';
+        span.textContent = inlineToSource(img);
+        img.replaceWith(span);
+        // 光标定位到源码末尾，用户可直接修改链接/说明
+        const range = document.createRange();
+        const tn = span.firstChild;
+        if (tn) range.setStart(tn, tn.textContent.length);
+        else range.setStart(span, 0);
+        range.collapse(true);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        suppressSourceRefresh = true; // 抑制紧随其后的 rAF 重建（保持源码编辑态）
+        return;
+      }
+      return;
+    }
     const a = t.closest('a');
     if (a && a.href) {
       e.preventDefault();
@@ -2190,11 +2225,13 @@ function bindEvents() {
 
   // 光标移动（点击/方向键）后刷新“光标所在块显示源码”（Typora 式延迟渲染）
   let sourceRefreshQueued = false;
+  let suppressSourceRefresh = false; // 点击图片切源码后抑制一次 rAF 重建
   const refreshSourceBlock = () => {
     if (sourceRefreshQueued) return;
     sourceRefreshQueued = true;
     requestAnimationFrame(() => {
       sourceRefreshQueued = false;
+      if (suppressSourceRefresh) { suppressSourceRefresh = false; return; } // 图片源码编辑态：跳过本次重建
       if (mode !== 'edit' || !state.currentId || composing) return; // IME 组合期不重建（防丢候选）
       const sel = window.getSelection();
       if (sel && sel.rangeCount && !sel.isCollapsed) return; // 有选区不刷新（防塌缩跨块选区）
