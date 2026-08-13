@@ -103,6 +103,7 @@ function inlineMd(s) {
     return '\u0000CS' + (spans.length - 1) + '\u0000';
   });
   s = s
+    .replace(/!\[([^\]]*)\]\((https?:[^)\s]+)\)/g, '<img src="$2" alt="$1" loading="lazy">')
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/\*([^*]+)\*/g, '<em>$1</em>');
@@ -160,6 +161,13 @@ function renderMarkdown(src, opts) {
       flushPara(); closeList();
       const lvl = h[1].length;
       html += '<h' + lvl + ' data-off="' + curOffset + '">' + inlineMd(esc(h[2])) + '</h' + lvl + '>';
+      i++; continue;
+    }
+
+    // 分割线：--- / *** / ___（三个相同标记符，可选空格分隔）
+    if (/^\s*([-*_])\s*\1\s*\1\s*$/.test(raw)) {
+      flushPara(); closeList();
+      html += '<hr data-off="' + curOffset + '">';
       i++; continue;
     }
 
@@ -801,10 +809,14 @@ function htmlToMarkdown(root, anchorNode, anchorOffset) {
       // 光标在元素边界：anchorOffset 0 → 元素起始；>= 子节点数 → 元素结束（遍历结束后解析）
       pendingBoundaryStart = md.length;
       pendingBoundaryEnd = anchorOffset >= node.childNodes.length;
+      // 空元素（无子节点）：结束边界 = 自身起始（防止点击空块时光标被解析到文档末尾）
+      pendingBoundaryBlank = node.childNodes.length === 0;
     }
     const tag = node.tagName;
     if (tag === 'H1' || tag === 'H2' || tag === 'H3' || tag === 'H4' || tag === 'H5' || tag === 'H6') {
       md += '#'.repeat(parseInt(tag[1], 10)) + ' ';
+      // 空标题：光标直接映射到标记后（`# ` 之后），避免边界解析到文末或标记前
+      if (caretOffset < 0 && anchorNode === node && !node.childNodes.length) caretOffset = md.length;
       node.childNodes.forEach((c) => walk(c, inList, inPre));
       md += '\n';
     } else if (tag === 'P') {
@@ -815,12 +827,24 @@ function htmlToMarkdown(root, anchorNode, anchorOffset) {
       node.childNodes.forEach((c) => walk(c, ol, inPre));
     } else if (tag === 'LI') {
       md += inList ? '1. ' : '- ';
+      // 空列表项：光标直接映射到标记后（`- ` 之后），防止边界解析到文末或标记前
+      if (caretOffset < 0 && anchorNode === node && !node.childNodes.length) caretOffset = md.length;
       node.childNodes.forEach((c) => walk(c, inList, inPre));
       md += '\n';
     } else if (tag === 'BLOCKQUOTE') {
       md += '> ';
+      // 空引用：光标直接映射到标记后（`> ` 之后）
+      if (caretOffset < 0 && anchorNode === node && !node.childNodes.length) caretOffset = md.length;
       node.childNodes.forEach((c) => walk(c, inList, inPre));
       md += '\n';
+    } else if (tag === 'HR') {
+      md += '---\n';
+      // 分割线不可编辑：点击后光标映射到其后
+      if (caretOffset < 0 && anchorNode === node) caretOffset = md.length;
+    } else if (tag === 'IMG') {
+      // 图片往返：与渲染正则字符数对称（![ + alt + ]( + src + ) = 5 + alt + src）
+      md += '![' + (node.getAttribute('alt') || '') + '](' + (node.getAttribute('src') || '') + ')';
+      if (caretOffset < 0 && anchorNode === node) caretOffset = md.length;
     } else if (tag === 'PRE') {
       // 语言标识还原（围栏相邻删除等场景下数据不丢）
       const lang = node.getAttribute && node.getAttribute('data-lang');
@@ -930,6 +954,10 @@ function locateOffset(root, targetOffset) {
       acc += 2;
       for (const c of node.childNodes) visit(c, inList, inPre);
       acc += 1;
+    } else if (tag === 'HR') {
+      acc += 4; // '---' + '\n'
+    } else if (tag === 'IMG') {
+      acc += 5 + (node.getAttribute('alt') || '').length + (node.getAttribute('src') || '').length; // 与 htmlToMarkdown 对称
     } else if (tag === 'PRE') {
       const lang = node.getAttribute && node.getAttribute('data-lang');
       acc += 4 + (lang ? lang.length : 0); // '```' + lang + '\n'
@@ -1304,7 +1332,8 @@ function toolbarInsert(md) {
       line = marker + line;
     }
     ta.value = v.slice(0, lineStart) + line + v.slice(lineEndPos);
-    ta.setSelectionRange(lineStart, lineStart + line.length);
+    // 光标定位到新行行末（不选中），用户可直接追加输入
+    ta.setSelectionRange(lineStart + line.length, lineStart + line.length);
     lastEditOffset = ta.selectionStart;
     lastEditEnd = ta.selectionEnd;
     ta.dispatchEvent(new Event('input', { bubbles: true }));
@@ -2071,12 +2100,53 @@ function bindEvents() {
     if (pos < 0) return;
     let value = ta.value;
     if (e.key === 'Enter') {
-      value = value.slice(0, pos) + '\n' + value.slice(pos);
-      pos += 1;
+      // 列表自动续表：无序列表续 `- `，有序列表序号 +1；空列表项回车退出列表
+      // 光标在行首时退化为普通换行（避免生成 `\n- - foo` 错误结构）
+      const lineStart = value.lastIndexOf('\n', pos - 1) + 1;
+      const lineEndIdx = value.indexOf('\n', pos);
+      const lineEndPos = lineEndIdx === -1 ? value.length : lineEndIdx;
+      const line = value.slice(lineStart, lineEndPos);
+      const ulMatch = pos > lineStart ? line.match(/^(\s*)([-*+])(\s+)(.*)$/) : null;
+      const olMatch = pos > lineStart ? line.match(/^(\s*)(\d+)([.)])(\s+)(.*)$/) : null;
+      if (ulMatch && !ulMatch[4].trim()) {
+        // 空无序项：移除标记退出列表，光标留在空行
+        const prefixLen = ulMatch[1].length + ulMatch[2].length + ulMatch[3].length;
+        value = value.slice(0, lineStart) + value.slice(lineStart + prefixLen);
+        pos = lineStart;
+      } else if (ulMatch) {
+        const insert = '\n' + ulMatch[1] + ulMatch[2] + ' ';
+        value = value.slice(0, pos) + insert + value.slice(pos);
+        pos += insert.length;
+      } else if (olMatch && !olMatch[5].trim()) {
+        // 空有序项：移除标记退出列表
+        const prefixLen = olMatch[1].length + olMatch[2].length + olMatch[3].length + olMatch[4].length;
+        value = value.slice(0, lineStart) + value.slice(lineStart + prefixLen);
+        pos = lineStart;
+      } else if (olMatch) {
+        const n = parseInt(olMatch[2], 10) + 1;
+        const insert = '\n' + olMatch[1] + n + olMatch[3] + ' ';
+        value = value.slice(0, pos) + insert + value.slice(pos);
+        pos += insert.length;
+      } else {
+        value = value.slice(0, pos) + '\n' + value.slice(pos);
+        pos += 1;
+      }
     } else if (e.key === 'Backspace') {
       if (pos === 0) return;
-      value = value.slice(0, pos - 1) + value.slice(pos);
-      pos -= 1;
+      // 空标记行（列表/引用/标题）：一键删除整行，光标回到上一行行末
+      const lineStart = value.lastIndexOf('\n', pos - 1) + 1;
+      const lineEndIdx = value.indexOf('\n', pos);
+      const lineEndPos = lineEndIdx === -1 ? value.length : lineEndIdx;
+      const line = value.slice(lineStart, lineEndPos);
+      const emptyMarked = /^(\s*)([-*+]\s+|>\s?|#{1,6}\s|\d+[.)]\s+)$/.test(line);
+      if (emptyMarked && pos > lineStart && pos <= lineEndPos) {
+        const rmEnd = lineEndIdx === -1 ? value.length : lineEndIdx + 1; // 含行尾换行
+        value = value.slice(0, lineStart) + value.slice(rmEnd);
+        pos = lineStart;
+      } else {
+        value = value.slice(0, pos - 1) + value.slice(pos);
+        pos -= 1;
+      }
     } else if (e.key === 'Delete') {
       if (pos >= value.length) return;
       value = value.slice(0, pos) + value.slice(pos + 1);
@@ -2097,12 +2167,24 @@ function bindEvents() {
     if (text) document.execCommand('insertText', false, text); // 纯文本粘贴，input 事件触发同步
   });
   // 链接点击：普通点击放光标进链接文字（编辑）；Ctrl/Cmd+点击才打开新标签
+  // 光标在链接内时链接会显示为 md-inline-src 源码 span（无 <a> 元素），需从源码文本解析 href
   $('#renderEdit').addEventListener('click', (e) => {
     if (!e.metaKey && !e.ctrlKey) return;
-    const a = e.target.closest && e.target.closest('a');
+    const t = e.target;
+    if (!t || !t.closest) return;
+    const a = t.closest('a');
     if (a && a.href) {
       e.preventDefault();
       window.open(a.href, '_blank', 'noopener');
+      return;
+    }
+    const src = t.closest('.md-inline-src');
+    if (src) {
+      const m = src.textContent.match(/\[([^\]]*)\]\((\S+?)\)/);
+      if (m && m[2]) {
+        e.preventDefault();
+        window.open(m[2], '_blank', 'noopener');
+      }
     }
   });
 

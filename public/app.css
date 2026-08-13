@@ -501,10 +501,16 @@ body.sidebar-resizing { cursor: col-resize; user-select: none; }
 .render-edit h1 { font-size: calc(var(--editor-font-size) * 1.47); margin: 1em 0 0.5em; }
 .render-edit h2 { font-size: calc(var(--editor-font-size) * 1.27); margin: 0.9em 0 0.4em; }
 .render-edit h3, .render-edit h4, .render-edit h5, .render-edit h6 { font-size: calc(var(--editor-font-size) * 1.07); margin: 0.8em 0 0.3em; }
+.render-edit h1, .render-edit h2, .render-edit h3, .render-edit h4, .render-edit h5, .render-edit h6 { min-height: calc(var(--editor-line-height) * 1em); }
 .render-edit h1:first-child, .render-edit h2:first-child, .render-edit h3:first-child { margin-top: 0.25em; }
-.render-edit p { margin: 0.4em 0; line-height: 1.75; }
-.render-edit ul, .render-edit ol { margin: 0.4em 0; padding-left: 1.6em; line-height: 1.75; }
-.render-edit li { margin: 0.1em 0; }
+.render-edit p { margin: 0.4em 0; line-height: var(--editor-line-height); }
+.render-edit ul, .render-edit ol { margin: 0.4em 0; padding-left: 1.6em; line-height: var(--editor-line-height); }
+.render-edit li { margin: 0.1em 0; min-height: calc(var(--editor-line-height) * 1em); }
+.render-edit hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1em 0;
+}
 .render-edit code {
   background: #f2f2f5;
   border-radius: 4px;
@@ -528,6 +534,9 @@ body.sidebar-resizing { cursor: col-resize; user-select: none; }
   padding: 0.4em 0.9em;
   margin: 0.5em 0;
   color: var(--text-2);
+  /* 空引用块也保持完整行高（随字号联动），避免只有 padding 高度被“压缩一半” */
+  line-height: var(--editor-line-height);
+  min-height: calc(var(--editor-line-height) * 1em);
 }
 .render-edit a { color: var(--accent); }
 .render-edit .empty-preview { color: var(--text-2); }
