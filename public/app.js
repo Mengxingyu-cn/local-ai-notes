@@ -171,6 +171,34 @@ function renderMarkdown(src, opts) {
       i++; continue;
     }
 
+    // Markdown 表格：连续以 | 开头结尾的行，且第 2 行为分隔行（---）；编辑态整块显示源码
+    const isSepRow = (s) => /^\s*\|?(\s*:?-{3,}:?\s*\|)+(\s*:?-{3,}:?\s*)?\s*$/.test(s);
+    if (/^\s*\|.*\|\s*$/.test(raw) && i + 1 < lines.length && isSepRow(lines[i + 1])) {
+      flushPara(); closeList();
+      const parseRow = (s) => s.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+      const headCells = parseRow(raw);
+      const bodyRows = [];
+      let j = i + 1;
+      lineStart += lines[j].length + 1; // 跳过分隔行
+      j++;
+      while (j < lines.length && /^\s*\|.*\|\s*$/.test(lines[j])) {
+        bodyRows.push(parseRow(lines[j]));
+        lineStart += lines[j].length + 1;
+        j++;
+      }
+      const colCount = headCells.length;
+      const padRow = (cells) => {
+        const c = cells.slice(0, colCount);
+        while (c.length < colCount) c.push('');
+        return c;
+      };
+      html += '<table data-off="' + curOffset + '"><thead><tr>' +
+        padRow(headCells).map((c) => '<th>' + inlineMd(esc(c)) + '</th>').join('') + '</tr></thead><tbody>' +
+        bodyRows.map((r) => '<tr>' + padRow(r).map((c) => '<td>' + inlineMd(esc(c)) + '</td>').join('') + '</tr>').join('') +
+        '</tbody></table>';
+      i = j; continue;
+    }
+
     const ul = raw.match(/^\s*[-*+]\s+(.*)$/);
     if (ul) {
       flushPara();
@@ -247,6 +275,56 @@ const state = {
 };
 
 let lastEditEnd = 0;   // 覆盖编辑记忆的选区终点（配合 lastEditOffset）
+
+/* ================= 自定义撤销栈 =================
+ * 编辑模式每次输入都会重建 innerHTML + 程序化改写 textarea.value，
+ * 浏览器原生 undo 栈会被反复清空，故实现轻量自定义撤销/重做。 */
+let undoStack = [];
+let redoStack = [];
+const UNDO_LIMIT = 200;
+
+/** 记录一次可撤销的状态（修改前调用）；merge=true 时合并进最近一次输入（连续打字作为一个撤销单元） */
+function recordUndo(v, p, merge) {
+  const now = Date.now();
+  const top = undoStack[undoStack.length - 1];
+  if (top && top.v === v) return;
+  if (merge && top && now - top.t < 800) {
+    top.t = now; // 仅刷新时间戳，保持最早的“输入前值”
+    redoStack = [];
+    return;
+  }
+  undoStack.push({ v, p: Math.max(0, p || 0), t: now });
+  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  redoStack = [];
+}
+
+/** 统一写 textarea：赋值 + 光标 + 触发 input（渲染重建/自动保存） */
+function setTaValue(ta, v, p) {
+  ta.value = v;
+  const pos = Math.max(0, Math.min(p != null ? p : v.length, v.length));
+  ta.selectionStart = pos;
+  ta.selectionEnd = pos;
+  lastEditOffset = pos;
+  lastEditEnd = pos;
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function performUndo(ta) {
+  if (!undoStack.length) return;
+  const cur = { v: ta.value, p: ta.selectionStart != null ? ta.selectionStart : ta.value.length };
+  const item = undoStack.pop();
+  redoStack.push(cur);
+  if (redoStack.length > UNDO_LIMIT) redoStack.shift();
+  setTaValue(ta, item.v, item.p);
+}
+
+function performRedo(ta) {
+  if (!redoStack.length) return;
+  const cur = { v: ta.value, p: ta.selectionStart != null ? ta.selectionStart : ta.value.length };
+  const item = redoStack.pop();
+  undoStack.push(cur);
+  setTaValue(ta, item.v, item.p);
+}
 
 const getNote = (id) => state.notes.find((n) => n.id === id);
 
@@ -587,6 +665,7 @@ function showEmpty() {
   $('#editorView').classList.add('hidden');
   $('#summarizeBtn').disabled = true;
   $('#reviewBtn').disabled = true;
+  $('#exportBtn').disabled = true;
 }
 
 function showEditor() {
@@ -594,6 +673,7 @@ function showEditor() {
   $('#editorView').classList.remove('hidden');
   $('#summarizeBtn').disabled = false;
   $('#reviewBtn').disabled = false;
+  $('#exportBtn').disabled = false;
 }
 
 function hideSummary() {
@@ -602,6 +682,8 @@ function hideSummary() {
 
 function fillEditor(note) {
   if (mode === 'edit') syncFromRenderEdit(); // IME 组合中跳过的最后输入兜底同步（防丢）
+  undoStack = []; // 切换笔记清空撤销栈（避免跨笔记撤销错乱）
+  redoStack = [];
   $('#titleInput').value = note.title || '';
   $('#contentInput').value = note.content || '';
   $('#tagsInput').value = (note.tags || []).join(', ');
@@ -845,6 +927,30 @@ function htmlToMarkdown(root, anchorNode, anchorOffset) {
       // 图片往返：与渲染正则字符数对称（![ + alt + ]( + src + ) = 5 + alt + src）
       md += '![' + (node.getAttribute('alt') || '') + '](' + (node.getAttribute('src') || '') + ')';
       if (caretOffset < 0 && anchorNode === node) caretOffset = md.length;
+    } else if (tag === 'TABLE') {
+      // 表格往返：表头行 + 分隔行（全 ---）+ 数据行；cell 内行内标记通过 walk 保留
+      let headCells = [];
+      const bodyRows = [];
+      for (const c of node.childNodes) {
+        if (c.nodeType !== Node.ELEMENT_NODE) continue;
+        if (c.tagName === 'THEAD') {
+          const tr = c.querySelector && c.querySelector('tr');
+          if (tr) headCells = Array.from(tr.children).filter((x) => x.tagName === 'TH');
+        } else if (c.tagName === 'TBODY') {
+          Array.from(c.children).forEach((tr) => {
+            if (tr.tagName === 'TR') bodyRows.push(Array.from(tr.children).filter((x) => x.tagName === 'TD'));
+          });
+        }
+      }
+      const cellMd = (cell) => {
+        const before = md.length;
+        cell.childNodes.forEach((cc) => walk(cc, inList, inPre));
+        return md.slice(before);
+      };
+      const lineMd = (cells) => '| ' + cells.map(cellMd).join(' | ') + ' |';
+      md += lineMd(headCells) + '\n';
+      md += '| ' + headCells.map(() => '---').join(' | ') + ' |\n';
+      bodyRows.forEach((r) => { md += lineMd(r) + '\n'; });
     } else if (tag === 'PRE') {
       // 语言标识还原（围栏相邻删除等场景下数据不丢）
       const lang = node.getAttribute && node.getAttribute('data-lang');
@@ -966,6 +1072,36 @@ function locateOffset(root, targetOffset) {
         return;
       }
       acc += len;
+    } else if (tag === 'TABLE') {
+      // 与 htmlToMarkdown 对称：表头行 + 分隔行 + 数据行；cell 内标记按 visit 累计
+      let headCells = [];
+      const bodyRows = [];
+      for (const c of node.childNodes) {
+        if (c.nodeType !== Node.ELEMENT_NODE) continue;
+        if (c.tagName === 'THEAD') {
+          const tr = c.querySelector && c.querySelector('tr');
+          if (tr) headCells = Array.from(tr.children).filter((x) => x.tagName === 'TH');
+        } else if (c.tagName === 'TBODY') {
+          Array.from(c.children).forEach((tr) => {
+            if (tr.tagName === 'TR') bodyRows.push(Array.from(tr.children).filter((x) => x.tagName === 'TD'));
+          });
+        }
+      }
+      const cellAcc = (cell) => {
+        for (const cc of cell.childNodes) visit(cc, inList, inPre);
+      };
+      const lineAcc = (cells) => {
+        acc += 2; // '| '
+        for (let k = 0; k < cells.length; k++) {
+          if (k > 0) acc += 3; // ' | '
+          cellAcc(cells[k]);
+        }
+        acc += 2; // ' |'
+        acc += 1; // '\n'
+      };
+      lineAcc(headCells);
+      acc += 2 + headCells.length * 3 + Math.max(0, headCells.length - 1) * 3 + 2 + 1; // 分隔行 '| --- | --- |\n'
+      bodyRows.forEach((r) => lineAcc(r));
     } else if (tag === 'PRE') {
       const lang = node.getAttribute && node.getAttribute('data-lang');
       acc += 4 + (lang ? lang.length : 0); // '```' + lang + '\n'
@@ -1054,8 +1190,8 @@ function renderEditFromTextarea(offset) {
       const source = md.slice(start, nextOff).replace(/\n+$/, '');
       const target = tmp.querySelector('[data-off="' + start + '"]');
       if (target) {
-        // Typora 机制：有标记块（标题/列表/引用/代码块）整块显示源码；普通段落保持渲染
-        const MARKED = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'BLOCKQUOTE', 'PRE'];
+        // Typora 机制：有标记块（标题/列表/引用/代码块/表格）整块显示源码；普通段落保持渲染
+        const MARKED = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'BLOCKQUOTE', 'PRE', 'TABLE'];
         if (MARKED.includes(target.tagName)) {
           if (source !== '') {
             // 保留原标签（li/blockquote/pre/h 结构不破坏，浏览器不会把元素移出容器）
@@ -1128,13 +1264,9 @@ function syncFromRenderEdit() {
   const { md, caretOffset } = htmlToMarkdown(re, anchorNode, anchorOffset);
   const ta = $('#contentInput');
   if (md !== ta.value) {
-    ta.value = md;
     const pos = Math.max(0, Math.min(caretOffset >= 0 ? caretOffset : md.length, md.length));
-    ta.selectionStart = pos;
-    ta.selectionEnd = pos;
-    lastEditOffset = pos;
-    lastEditEnd = pos;
-    ta.dispatchEvent(new Event('input', { bubbles: true })); // 自动保存 + 渲染（diff 幂等）
+    recordUndo(ta.value, ta.selectionStart, true); // 用户连续输入合并为同一撤销单元
+    setTaValue(ta, md, pos);
   } else if (caretOffset >= 0) {
     lastEditOffset = caretOffset;
     lastEditEnd = caretOffset;
@@ -1304,6 +1436,7 @@ function toolbarInsert(md) {
   const v = ta.value;
   let start = ta.selectionStart != null ? ta.selectionStart : v.length;
   let end = ta.selectionEnd != null ? ta.selectionEnd : v.length;
+  recordUndo(v, start, false); // 工具栏插入是结构操作，不合并
 
   // 分割线：始终独立成行
   if (md === 'hr') {
@@ -1382,6 +1515,46 @@ function toolbarInsert(md) {
   lastEditOffset = ta.selectionStart;
   lastEditEnd = ta.selectionEnd;
   ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/* ================= 导出 ================= */
+
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime || 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** 导出当前笔记为 .md 文件 */
+async function exportNote() {
+  const note = getNote(state.currentId);
+  if (!note) { toast('请先选择一条笔记', 'info'); return; }
+  await flushSave(); // 先保存未落盘内容，导出最新版
+  const safeTitle = String(note.title || '无标题').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60);
+  const tags = (note.tags || []).length ? '\n\n标签：' + note.tags.join(', ') : '';
+  downloadFile(safeTitle + '.md', (note.content || '') + tags + '\n');
+  toast('已导出「' + (note.title || '无标题') + '」', 'success', 1600);
+}
+
+/** 导出全部笔记为一个 .md 文件 */
+async function exportAllNotes() {
+  if (!state.notes.length) { toast('暂无笔记可导出', 'info'); return; }
+  await flushSave();
+  const sorted = state.notes.slice().sort((a, b) => noteTime(b) - noteTime(a));
+  const md = sorted.map((n) => {
+    const tags = (n.tags || []).length ? '\n\n标签：' + n.tags.join(', ') : '';
+    return '# ' + (n.title || '无标题') + '\n\n' + (n.content || '') + tags;
+  }).join('\n\n---\n\n');
+  const d = new Date();
+  const stamp = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  downloadFile('全部笔记_' + stamp + '.md', md + '\n');
+  toast('已导出 ' + sorted.length + ' 篇笔记', 'success', 1600);
 }
 
 /* ================= AI 总结 ================= */
@@ -1792,6 +1965,18 @@ function showHistoryDetail(idx) {
     '<div class="history-section"><div class="history-section-title">薄弱点</div>' +
       (weak.length ? weak.map((w) => '<div class="history-chip">' + esc(w) + '</div>').join('') : '<div class="muted">暂无薄弱点，继续保持！</div>') +
     '</div>' +
+    // 答题详情（错题回看）：每题展示问题/回答/评判/评语/原文引用
+    (h.qa && h.qa.length ? '<div class="history-section"><div class="history-section-title">答题详情（共 ' + h.qa.length + ' 题）</div>' +
+      h.qa.map((q, qi) => {
+        const vLabel = q.verdict === 'yes' ? '✅ 正确' : (q.verdict === 'partial' ? '⚠️ 部分正确' : '❌ 错误');
+        const vCls = q.verdict === 'yes' ? 'yes' : (q.verdict === 'partial' ? 'partial' : 'no');
+        return '<div class="qa-item"><div class="qa-head"><span class="qa-num">第 ' + (qi + 1) + ' 题</span><span class="qa-verdict ' + vCls + '">' + vLabel + '</span></div>' +
+          '<div class="qa-field"><span class="qa-label">问题</span>' + esc(q.question || '') + '</div>' +
+          '<div class="qa-field"><span class="qa-label">你的回答</span>' + esc(q.answer || '（未作答）') + '</div>' +
+          (q.comment ? '<div class="qa-field"><span class="qa-label">评语</span>' + esc(q.comment) + '</div>' : '') +
+          (q.reference ? '<div class="qa-field"><span class="qa-label">原文引用</span>' + esc(q.reference) + '</div>' : '') +
+          '</div>';
+      }).join('') + '</div>' : '') +
     '<div class="history-section"><div class="history-section-title">学习建议</div>' +
       (sug.length ? '<ul class="history-suggestions">' + sug.map((s) => '<li>' + esc(s) + '</li>').join('') + '</ul>' : '<div class="muted">暂无建议</div>') +
     '</div>';
@@ -2046,6 +2231,19 @@ function bindEvents() {
   ['titleInput', 'contentInput', 'tagsInput'].forEach((id) => {
     $('#' + id).addEventListener('input', onEditorInput);
   });
+  // 源码模式：textarea 焦点时的 Ctrl+Z/Ctrl+Y 也用自定义撤销栈（程序化赋值同样破坏原生 undo）
+  $('#contentInput').addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) {
+      e.preventDefault();
+      performUndo($('#contentInput'));
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
+      e.preventDefault();
+      performRedo($('#contentInput'));
+      return;
+    }
+  });
   $$('.mode-btn').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
 
   // Markdown 工具栏
@@ -2065,6 +2263,17 @@ function bindEvents() {
   // 在 contentInput 上改 Markdown 再重建，避免与浏览器原生 DOM 删除/换行行为竞态（P0-2/P0-3/P2-1）
   $('#renderEdit').addEventListener('keydown', (e) => {
     if (composing) return; // IME 组合中（Enter 用于选词）不拦截
+    // 自定义撤销/重做（编辑模式原生 undo 被 innerHTML 重建破坏）
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) {
+      e.preventDefault();
+      performUndo($('#contentInput'));
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
+      e.preventDefault();
+      performRedo($('#contentInput'));
+      return;
+    }
     if (e.key !== 'Enter' && e.key !== 'Backspace' && e.key !== 'Delete' && e.key !== 'Tab') return;
     e.preventDefault();
     const ta = $('#contentInput');
@@ -2094,12 +2303,8 @@ function bindEvents() {
       const lo = Math.min(selStart, len);
       const hi = Math.min(selEnd, len);
       if (hi > lo) {
-        ta.value = ta.value.slice(0, lo) + ta.value.slice(hi);
-        ta.selectionStart = lo;
-        ta.selectionEnd = lo;
-        lastEditOffset = lo;
-        lastEditEnd = lo;
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        recordUndo(ta.value, lo, false); // 结构操作不合并
+        setTaValue(ta, ta.value.slice(0, lo) + ta.value.slice(hi), lo);
         return;
       }
     }
@@ -2112,6 +2317,10 @@ function bindEvents() {
     let pos = caretOffset >= 0 ? caretOffset : (lastEditOffset >= 0 ? lastEditOffset : ta.value.length);
     if (pos < 0) return;
     let value = ta.value;
+    // 早退检查先于记录（避免空操作入撤销栈）
+    if (e.key === 'Backspace' && pos === 0) return;
+    if (e.key === 'Delete' && pos >= value.length) return;
+    recordUndo(value, pos, false); // 结构按键操作不合并（Enter/Backspace/Delete/Tab）
     if (e.key === 'Enter') {
       // 列表自动续表：无序列表续 `- `，有序列表序号 +1；空列表项回车退出列表
       // 光标在行首时退化为普通换行（避免生成 `\n- - foo` 错误结构）
@@ -2167,12 +2376,7 @@ function bindEvents() {
       value = value.slice(0, pos) + '  ' + value.slice(pos);
       pos += 2;
     }
-    ta.value = value;
-    ta.selectionStart = pos;
-    ta.selectionEnd = pos;
-    lastEditOffset = pos;
-    lastEditEnd = pos;
-    ta.dispatchEvent(new Event('input', { bubbles: true })); // onEditorInput：保存 + 重建 + 光标恢复
+    setTaValue(ta, value, pos); // onEditorInput：保存 + 重建 + 光标恢复
   });
   $('#renderEdit').addEventListener('paste', (e) => {
     e.preventDefault();
@@ -2252,6 +2456,8 @@ function bindEvents() {
 
   $('#summarizeBtn').addEventListener('click', summarize);
   $('#reviewBtn').addEventListener('click', startReview);
+  $('#exportBtn').addEventListener('click', exportNote);
+  $('#exportAllBtn').addEventListener('click', exportAllNotes);
   $('#settingsBtn').addEventListener('click', openSettings);
 
   // 目录

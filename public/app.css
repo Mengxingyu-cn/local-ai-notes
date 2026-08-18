@@ -297,6 +297,7 @@ body.sidebar-resizing { cursor: col-resize; user-select: none; }
 @media (hover: none) { .note-del { opacity: .65; } }
 
 .new-note-btn { margin: 10px 12px 14px; }
+.export-all-btn { margin: 0 12px 8px; }
 
 /* 骨架屏 */
 .skeleton {
@@ -527,6 +528,22 @@ body.sidebar-resizing { cursor: col-resize; user-select: none; }
   margin: 0.5em 0;
 }
 .render-edit pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.6; }
+.render-edit table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: calc(var(--editor-font-size) * 0.92);
+  line-height: 1.6;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.render-edit th, .render-edit td {
+  border: 1px solid var(--border);
+  padding: 5px 12px;
+  text-align: left;
+  min-width: 40px;
+}
+.render-edit th { background: #f4f6f9; font-weight: 600; }
 .render-edit blockquote {
   border-left: 3px solid var(--accent);
   background: #f7f9fc;
@@ -971,6 +988,23 @@ body.sidebar-resizing { cursor: col-resize; user-select: none; }
 }
 .history-suggestions { padding-left: 20px; line-height: 1.85; font-size: 13px; }
 .history-detail-actions { margin-top: 16px; display: flex; justify-content: flex-end; }
+
+/* 答题详情（错题回看） */
+.qa-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: #fcfcfd;
+}
+.qa-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.qa-num { font-size: 12.5px; font-weight: 700; color: var(--text); }
+.qa-verdict { font-size: 11.5px; font-weight: 700; padding: 2px 10px; border-radius: 999px; }
+.qa-verdict.yes { background: #e8f6ef; color: #1f7a4d; }
+.qa-verdict.partial { background: #fdf3e0; color: #9a6700; }
+.qa-verdict.no { background: #fdecec; color: #c43e43; }
+.qa-field { font-size: 12.5px; line-height: 1.7; margin-top: 5px; color: #3a3a40; word-break: break-word; }
+.qa-label { display: inline-block; font-size: 11px; color: var(--text-2); background: #f0f0f5; border-radius: 4px; padding: 0 6px; margin-right: 6px; }
 
 /* 回收站 */
 .trash-toolbar {

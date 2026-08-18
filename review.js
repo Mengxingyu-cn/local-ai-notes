@@ -299,6 +299,30 @@ async function endReview(settings, sessionId) {
   }
   const suggestions = suggestionsText.split('\n').map((s) => s.replace(/^[-*•\s]+/, '').trim()).filter(Boolean);
 
+  // 从会话历史中解析题目/回答/评判，存入历史以供错题回看
+  function parseQAFromHistory(history) {
+    const qa = [];
+    let cur = null;
+    for (const msg of history) {
+      const c = msg.content;
+      if (msg.role === 'assistant' && c.startsWith('【问题】')) {
+        if (cur) qa.push(cur);
+        cur = { question: c.slice(4).trim(), answer: '', verdict: '', comment: '', reference: '' };
+      } else if (msg.role === 'user' && c.startsWith('我的回答：')) {
+        if (cur) cur.answer = c.slice(5).replace(/（请评判[^）]*）/, '').trim();
+      } else if (msg.role === 'assistant' && c.startsWith('【评判】')) {
+        if (cur) {
+          const parts = c.slice(4).split('|');
+          cur.verdict = parts[0] || '';
+          cur.comment = parts[1] || '';
+          cur.reference = parts[2] ? parts[2].replace('引用：', '').trim() : '';
+        }
+      }
+    }
+    if (cur) qa.push(cur);
+    return qa;
+  }
+
   const report = {
     total: session.askedCount,
     correct: stats.yes,
@@ -314,9 +338,13 @@ async function endReview(settings, sessionId) {
     finishedAt: Date.now(),
   };
 
-  // 持久化到复盘历史（设置 → 复盘历史记录 可查看）；带 id 与笔记关联
+  // 持久化到复盘历史（设置 → 复盘历史记录 可查看）；带 id 与笔记关联、题目原文（错题回看）
   try {
-    const historyEntry = Object.assign({ id: crypto.randomBytes(8).toString('hex'), noteId: session.noteId }, report);
+    const historyEntry = Object.assign({
+      id: crypto.randomBytes(8).toString('hex'),
+      noteId: session.noteId,
+      qa: parseQAFromHistory(session.history), // 每题：问题/回答/评判/评语/原文引用
+    }, report);
     const history = loadReviewHistory();
     history.unshift(historyEntry); // 最新在前
     if (history.length > 200) history.length = 200; // 条数上限，防无限增长
