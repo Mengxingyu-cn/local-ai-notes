@@ -70,6 +70,13 @@ function sendJSON(res, status, obj) {
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
+    // 纵深防御：请求体必须是 JSON（跨站表单提交是 urlencoded/multipart，直接拒绝）
+    const ct = String(req.headers['content-type'] || '').toLowerCase();
+    if (ct && !ct.includes('application/json')) {
+      const err = new Error('请求体必须是 JSON');
+      err.statusCode = 415;
+      return reject(err);
+    }
     let size = 0;
     let overLimit = false;
     const chunks = [];
@@ -403,6 +410,18 @@ const server = http.createServer((req, res) => {
   if (host && host !== 'localhost' && host !== '127.0.0.1' && host !== '[::1]') {
     sendJSON(res, 403, { error: '仅允许通过 localhost 访问' });
     return;
+  }
+  // 跨站请求防护（CSRF）：若请求带 Origin 头（浏览器跨站 fetch/form 必带），
+  // 来源必须与本应用同源（localhost/127.0.0.1/[::1] 任意端口），否则拒绝。
+  // 无 Origin 头的请求（同源 GET、curl、Node 客户端等）直接放行，不影响本地工具。
+  const origin = req.headers.origin;
+  if (origin) {
+    let originHost = '';
+    try { originHost = new URL(origin).hostname.toLowerCase(); } catch (_) { /* Origin 解析失败（如 null）→ 按拒绝处理 */ }
+    if (originHost !== 'localhost' && originHost !== '127.0.0.1' && originHost !== '[::1]') {
+      sendJSON(res, 403, { error: '跨站请求被拒绝' });
+      return;
+    }
   }
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = url.pathname;
