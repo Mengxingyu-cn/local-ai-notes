@@ -1,37 +1,68 @@
-ï»¿@echo off
-chcp 65001 >nul
-title æœ¬åœ° AI ç¬”è®° - å¯åŠ¨å™¨
+@echo off
+title ±¾µØ AI ±Ê¼Ç - Æô¶¯Æ÷
 setlocal
+cd /d "%~dp0"
 
 if not defined PORT set PORT=3000
 
 echo ============================================
-echo    ðŸ“ æœ¬åœ° AI ç¬”è®° å¯åŠ¨å™¨
+echo    ? ±¾µØ AI ±Ê¼Ç Æô¶¯Æ÷
 echo ============================================
 echo.
 
-rem ---- æ£€æŸ¥ Node.js æ˜¯å¦å®‰è£… ----
-where node >nul 2>nul
-if errorlevel 1 (
-    echo [é”™è¯¯] æœªæ£€æµ‹åˆ° Node.jsï¼
-    echo        è¯·å…ˆå®‰è£… Node.js 18 æˆ–æ›´é«˜ç‰ˆæœ¬ï¼šhttps://nodejs.org/
+rem ---- Ñ°ÕÒ Node.js£ºÓÅÏÈ±ãÐ¯°æ£¨node\node.exe£¬Ãâ°²×°£©£¬Æä´ÎÏµÍ³°²×°°æ ----
+set "NODE_EXE="
+if exist "%~dp0node\node.exe" (
+    set "NODE_EXE=%~dp0node\node.exe"
+    echo [ÐÅÏ¢] Ê¹ÓÃ±ãÐ¯°æ Node.js£¨node ÎÄ¼þ¼Ð£©
+) else (
+    where node >nul 2>nul
+    if not errorlevel 1 (
+        set "NODE_EXE=node"
+        echo [ÐÅÏ¢] Ê¹ÓÃÏµÍ³°²×°µÄ Node.js
+    )
+)
+
+if not defined NODE_EXE (
+    echo [´íÎó] Î´ÕÒµ½ Node.js£¡
+    echo.
+    echo   ÐÂÊÖÓÃ»§ÍÆ¼öÊ¹ÓÃ±ãÐ¯°æ£¨Ãâ°²×°£©£º
+    echo   1. ´ò¿ª https://nodejs.org/en/download
+    echo   2. ÔÚ Windows ²¿·ÖÑ¡Ôñ Windows Binary ^(.zip^) ÏÂÔØ
+    echo   3. ½âÑ¹ºó°ÑÎÄ¼þ¼ÐÀïµÄÎÄ¼þ ^(node.exe µÈ^) È«²¿·ÅÈë±¾ÏîÄ¿µÄ node ÎÄ¼þ¼Ð
+    echo   4. ·ÅºÃºóÖØÐÂË«»÷±¾½Å±¾¼´¿ÉÆô¶¯
+    echo.
+    echo   Ò²¿ÉÒÔÖ±½Ó°²×° Node.js£ºhttps://nodejs.org/
     echo.
     pause
     exit /b 1
 )
 
-for /f "delims=" %%v in ('node -v') do echo [ä¿¡æ¯] Node.js ç‰ˆæœ¬ï¼š%%v
-echo [ä¿¡æ¯] æœåŠ¡ç«¯å£ï¼š%PORT%
-echo [ä¿¡æ¯] 2 ç§’åŽè‡ªåŠ¨æ‰“å¼€æµè§ˆå™¨ï¼Œè‹¥æœªæ‰“å¼€è¯·æ‰‹åŠ¨è®¿é—® http://localhost:%PORT%
-echo [ä¿¡æ¯] å…³é—­æœ¬çª—å£æˆ–æŒ‰ Ctrl+C å³å¯åœæ­¢æœåŠ¡
+rem ---- Ð£Ñé Node.js Ö÷°æ±¾²»µÍÓÚ 18 ----
+for /f "delims=" %%v in ('"%NODE_EXE%" -v 2^>nul') do set NODE_VER=%%v
+echo [ÐÅÏ¢] Node.js °æ±¾£º%NODE_VER%
+set "VER_MAJOR="
+for /f "tokens=1 delims=." %%a in ("%NODE_VER:~1%") do set VER_MAJOR=%%a
+if defined VER_MAJOR (
+    if %VER_MAJOR% LSS 18 (
+        echo [´íÎó] Node.js °æ±¾¹ýµÍ£¬ÐèÒª 18 »ò¸ü¸ß°æ±¾£¡
+        echo   Çë¸ü»»ÐÂ°æ±ãÐ¯°æ Node£¨ÖØÐÂ¸²¸Ç node ÎÄ¼þ¼Ð£©£¬»òÉý¼¶ÏµÍ³ Node.js¡£
+        pause
+        exit /b 1
+    )
+)
+
+echo [ÐÅÏ¢] ·þÎñ¶Ë¿Ú£º%PORT%
+echo [ÐÅÏ¢] 2 Ãëºó×Ô¶¯´ò¿ªä¯ÀÀÆ÷£¬ÈôÎ´´ò¿ªÇëÊÖ¶¯·ÃÎÊ http://localhost:%PORT%
+echo [ÐÅÏ¢] ¹Ø±Õ±¾´°¿Ú»ò°´ Ctrl+C ¼´¿ÉÍ£Ö¹·þÎñ
 echo.
 
-rem ---- å»¶è¿Ÿ 2 ç§’æ‰“å¼€æµè§ˆå™¨ï¼ˆç­‰æœåŠ¡ç›‘å¬å°±ç»ªï¼‰ ----
+rem ---- ÑÓ³Ù 2 Ãë´ò¿ªä¯ÀÀÆ÷£¨µÈ·þÎñ¼àÌý¾ÍÐ÷£© ----
 start "" /b cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:%PORT%"
 
-rem ---- å¯åŠ¨æœåŠ¡ ----
-node server.js
+rem ---- Æô¶¯·þÎñ ----
+"%NODE_EXE%" server.js
 
 echo.
-echo [æç¤º] æœåŠ¡å·²åœæ­¢ã€‚è‹¥å› ç«¯å£è¢«å ç”¨é€€å‡ºï¼Œè¯·å…³é—­å ç”¨ %PORT% ç«¯å£çš„ç¨‹åºåŽé‡è¯•ã€‚
+echo [ÌáÊ¾] ·þÎñÒÑÍ£Ö¹¡£ÈôÒò¶Ë¿Ú±»Õ¼ÓÃÍË³ö£¬Çë¹Ø±ÕÕ¼ÓÃ %PORT% ¶Ë¿ÚµÄ³ÌÐòºóÖØÊÔ¡£
 pause

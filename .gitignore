@@ -4,3 +4,5 @@ node_modules/
 data/*.json
 !data/.gitkeep
 data/*.bak-*
+node/*
+!node/README.txt

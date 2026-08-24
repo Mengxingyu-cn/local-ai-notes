@@ -25,13 +25,16 @@
 
 ## 快速开始
 
-### 第一步：安装 Node.js
+### 第一步：获取 Node.js（二选一）
 
-需要 [Node.js](https://nodejs.org/) **18 或更高版本**（v22 已测试）。官网下载 LTS 版安装即可，安装完成后在终端验证：
+**方式 A（新手推荐，零安装）：** 便携版 Node.js —— 下载后放入项目 `node/` 文件夹即可，不需要安装任何东西。
 
-```bash
-node -v   # 应显示 v18 或更高
-```
+1. 打开 <https://nodejs.org/en/download>
+2. 在 Windows 部分选择 **Windows Binary (.zip)** 下载
+3. 解压后把文件夹里的内容（`node.exe` 等）全部复制到项目的 `node/` 文件夹
+4. 完成（更详细说明见项目内 `node/README.txt`）
+
+**方式 B：** 安装 Node.js —— [官网](https://nodejs.org/) 下载 LTS 版安装，终端运行 `node -v` 确认版本为 18 或更高（v22 已测试）。
 
 ### 第二步：获取代码
 
@@ -40,7 +43,7 @@ node -v   # 应显示 v18 或更高
 
 ### 第三步：启动
 
-**Windows**：双击 `start.bat`（自动检查 Node、自动打开浏览器）。
+**Windows**：双击 `start.bat`（脚本自动使用 `node/` 文件夹里的便携版 Node，找不到时退回系统安装版；自动检查版本、自动打开浏览器）。
 
 **macOS / Linux**：在项目目录下打开终端：
 

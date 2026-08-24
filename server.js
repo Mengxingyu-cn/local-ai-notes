@@ -458,10 +458,23 @@ const server = http.createServer((req, res) => {
 });
 
 // 仅监听本机回环地址：本地应用不暴露到局域网（防 LAN 任意设备读写/烧 API 配额）
+// 端口占用时给出新手友好的中文提示（替代原始 EADDRINUSE 堆栈）
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error('');
+    console.error(`  Port ${PORT} is already in use!`);
+    console.error('  Close the program using this port, or use another port:');
+    console.error('  Windows: set PORT=8080 and run start.bat again');
+    console.error('  macOS/Linux: PORT=8080 node server.js');
+    console.error('');
+    process.exit(1);
+  }
+  throw e;
+});
 server.listen(PORT, '127.0.0.1', () => {
   console.log('');
-  console.log('  📝 AI 笔记复盘 已启动');
-  console.log(`  打开浏览器访问:  http://localhost:${PORT}`);
-  console.log('  提示: 先点右上角"设置"配置 AI API Key（默认 DeepSeek）');
+  console.log('  Local AI Notes is running');
+  console.log(`  Open: http://localhost:${PORT}`);
+  console.log('  Tip: configure your AI API Key in Settings (top right)');
   console.log('');
 });
