@@ -1,0 +1,58 @@
+name: Build Windows Portable Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag -replace '^v', ''
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Download official Node.js portable (v24.14.0)
+        shell: pwsh
+        run: |
+          $nodeVer = "v24.14.0"
+          $base = "https://nodejs.org/dist/$nodeVer"
+          Invoke-WebRequest -Uri "$base/node-$nodeVer-win-x64.zip" -OutFile node-win-x64.zip -UseBasicParsing
+          Invoke-WebRequest -Uri "$base/SHASUMS256.txt" -OutFile SHASUMS256.txt -UseBasicParsing
+          $expected = (Select-String -Path SHASUMS256.txt -Pattern "node-$nodeVer-win-x64.zip").Line.Split(" ")[0]
+          $actual = (Get-FileHash node-win-x64.zip -Algorithm SHA256).Hash.ToLower()
+          if ($expected -ne $actual) { throw "SHA256 mismatch: expected $expected, got $actual" }
+          Expand-Archive node-win-x64.zip -DestinationPath node-extract -Force
+
+      - name: Assemble package
+        shell: pwsh
+        run: |
+          $pkgName = "local-ai-notes-${{ steps.ver.outputs.version }}"
+          $pkg = Join-Path $env:RUNNER_TEMP "package\$pkgName"
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          robocopy "$env:GITHUB_WORKSPACE" $pkg /E /XD .git /NFL /NDL /NJH /NJS | Out-Null
+          if ($LASTEXITCODE -ge 8) { exit $LASTEXITCODE }
+          Remove-Item "$pkg\data\*.json" -Force -ErrorAction SilentlyContinue
+          $nodeDir = Get-ChildItem "$env:RUNNER_TEMP\node-extract" -Directory | Select-Object -First 1
+          robocopy $nodeDir.FullName (Join-Path $pkg "node") /E /NFL /NDL /NJH /NJS | Out-Null
+          if ($LASTEXITCODE -ge 8) { exit $LASTEXITCODE }
+          Compress-Archive -Path $pkg -DestinationPath "$env:RUNNER_TEMP\$pkgName-windows-portable.zip" -CompressionLevel Optimal
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ runner.temp }}/*-windows-portable.zip
+          body: |
+            🚀 新手通道：下载 **Windows 完整包** → 解压 → 双击 start.bat，浏览器自动打开，全程无需安装任何环境（内置官方 Node.js v24.14.0，SHA-256 已校验）。
