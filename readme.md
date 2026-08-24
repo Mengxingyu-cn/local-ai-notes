@@ -6,6 +6,17 @@
 
 **零依赖**：后端只用 Node.js 内置模块，前端是原生 HTML/CSS/JS，**不需要 npm install**，数据全部保存在你自己的电脑上。
 
+## 🚀 新手通道（不熟悉技术？从这里开始）
+
+**下载 Windows 完整包 → 解压 → 双击 start.bat，浏览器自动打开，全程不需要安装任何东西。**
+
+1. 打开 [Releases 页面](https://github.com/Mengxingyu-cn/local-ai-notes/releases/latest)
+2. 下载最新的 **Windows 完整包**（文件名形如 `local-ai-notes-vX.X.X-windows-portable.zip`，内置了 Node.js，约 36MB）
+3. 解压到你喜欢的任意文件夹
+4. 双击 `start.bat`，浏览器会自动打开应用（首次打开请先在右上角设置里配置 AI Key，纯笔记功能不需要）
+
+> 提示：完整包内置了便携版 Node.js（v24.14.0），不需要安装 Node；想自己安装 Node 的也可以参考下方“快速开始”。
+
 ## 功能
 
 | 功能 | 说明 |
