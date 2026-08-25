@@ -43,12 +43,16 @@ jobs:
           $pkgName = "local-ai-notes-${{ steps.ver.outputs.version }}"
           $pkg = Join-Path $env:RUNNER_TEMP "package\$pkgName"
           New-Item -ItemType Directory -Force -Path $pkg | Out-Null
-          robocopy "$env:GITHUB_WORKSPACE" $pkg /E /XD .git /NFL /NDL /NJH /NJS | Out-Null
-          if ($LASTEXITCODE -ge 8) { exit $LASTEXITCODE }
+          # 复制项目（排除 .git；用 Get-ChildItem -Force 保留 .gitignore/.github 等点文件）
+          Get-ChildItem "$env:GITHUB_WORKSPACE" -Force | Where-Object { $_.Name -ne '.git' } | ForEach-Object {
+            Copy-Item $_.FullName $pkg -Recurse -Force
+          }
           Remove-Item "$pkg\data\*.json" -Force -ErrorAction SilentlyContinue
           $nodeDir = Get-ChildItem "$env:RUNNER_TEMP\node-extract" -Directory | Select-Object -First 1
-          robocopy $nodeDir.FullName (Join-Path $pkg "node") /E /NFL /NDL /NJH /NJS | Out-Null
-          if ($LASTEXITCODE -ge 8) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path (Join-Path $pkg "node") | Out-Null
+          Get-ChildItem $nodeDir.FullName -Force | ForEach-Object {
+            Copy-Item $_.FullName (Join-Path $pkg "node") -Recurse -Force
+          }
           Compress-Archive -Path $pkg -DestinationPath "$env:RUNNER_TEMP\$pkgName-windows-portable.zip" -CompressionLevel Optimal
 
       - name: Create Release
