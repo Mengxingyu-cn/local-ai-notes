@@ -17,6 +17,14 @@
 
 > 提示：完整包内置了便携版 Node.js（v24.14.0），不需要安装 Node；想自己安装 Node 的也可以参考下方“快速开始”。
 
+## ✨ 界面预览
+
+<p align="center">
+  <img src="screenshots/main.png" width="30%" alt="主界面">
+  <img src="screenshots/review.png" width="30%" alt="复盘过程">
+  <img src="screenshots/report.png" width="30%" alt="复盘报告">
+</p>
+
 ## 功能
 
 | 功能 | 说明 |
@@ -27,11 +35,12 @@
 | 📑 侧边栏目录 | 一键生成标题大纲（H1-H3），点击跳转 |
 | 🏷 标签分类 | 标签筛选 + 快捷标签一键添加/移除 + 列表显示标签 |
 | 🔀 笔记排序 | 按时间（默认）/ 名称 A-Z / 自定义（拖动排序） |
-| 🗑 回收站 | 删除的笔记先进回收站（含 AI 总结一并保留），可恢复或彻底删除 |
+| 🗑 回收站 | 删除的笔记和复盘记录都先进回收站（含 AI 总结一并保留），可恢复或彻底删除；上限 200 条，满时提示清理后再删除 |
 | 💾 导出 | 单篇导出 .md 文件；全部笔记一键导出为一个 .md 文件 |
+| 📊 字数统计 | 编辑区右下角实时显示 字符 / 词 / 行 统计 |
 | ✨ AI 总结 | 一键生成结构化总结，自动保存到笔记，重新打开可见；已总结笔记再次点击会询问是否重新生成 |
 | 🔌 多 AI 接入 | 预设 DeepSeek / Kimi / OpenAI / 通义千问 / 智谱 / OpenRouter / Anthropic / Ollama + 自定义 OpenAI 兼容端点 |
-| 🧠 标签组复盘 | 按标签组聚合笔记内容，AI 逐题提问 → 你回答 → AI 判定 对/部分对/不对并引用笔记原文；一轮 8 题 |
+| 🧠 标签组复盘 | 选择标签组后**多选要复盘的笔记**，AI 根据所选笔记自动决定题数并逐题提问 → 你回答 → AI 判定 对/部分对/不对并引用笔记原文；所选内容超预算时弹窗明确提示（建议分批或减少选择） |
 | 📚 复盘历史 | 每次复盘报告自动保存：统计、薄弱点、学习建议 + **答题详情**（题目/你的回答/评判/原文引用，支持错题回看） |
 
 ## 快速开始
@@ -160,18 +169,19 @@ local-ai-notes/
 | GET | /api/providers | 厂商预设列表 |
 | POST | /api/ai/test | 连通性测试（不保存） |
 | POST | /api/ai/summarize | `{noteId}` → `{summary}`（自动持久化） |
-| POST | /api/ai/review/start | `{tag}` 或 `{noteId}` → `{sessionId, question, noteTitle}` |
+| POST | /api/ai/review/start | `{tag, noteIds}`（标签组内多选笔记）或 `{noteId}` → `{sessionId, question, noteTitle}` |
 | POST | /api/ai/review/answer | `{sessionId, answer}` → `{verdict, nextQuestion, done, stats}` |
 | POST | /api/ai/review/end | `{sessionId}` → `{report}`（自动存入复盘历史） |
 | GET | /api/review-history | 复盘历史列表 |
 | GET | /api/review-history/:id | 单条复盘记录详情 |
-| DELETE | /api/review-history/:id | 删除复盘记录 |
+| DELETE | /api/review-history/:id | 软删除复盘记录（移入回收站，可恢复） |
 
 ## 修改指南
 
 - **换 AI 厂商 / 改默认模型**：`ai.js` 顶部的 `PROVIDERS` 数组（注意与 `storage.js` 的 `DEFAULT_SETTINGS` 保持一致）；运行中可直接在设置页改（优先级更高）。
 - **一轮复盘题数**：`review.js` 顶部 `MAX_QUESTIONS`（默认 8）。
-- **笔记上下文上限**：`review.js` 顶部 `MAX_NOTE_CHARS`（默认 12000 字符，标签组复盘为 2 倍）。
+- **复盘上下文上限**：单篇笔记 `review.js` 顶部 `MAX_NOTE_CHARS`（默认 12000 字符）；多篇聚合 `GROUP_MAX`（默认 40000 字符，且前端 `public/app.js` 顶部的 `REVIEW_BUDGET` 需与之一致）。
+- **回收站上限**：`server.js` 顶部 `TRASH_LIMIT`（默认 200 条，满时拒绝新删除并提示）。
 - **端口**：`PORT` 环境变量。
 - **界面文案/样式**：`public/index.html`（结构）、`public/app.css`（样式）、`public/app.js`（逻辑）。
 - **工具栏按钮与插入规则**：`public/app.js` 的 `MD_RULES` 对象。
