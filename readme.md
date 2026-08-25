@@ -11,7 +11,7 @@
 **下载 Windows 完整包 → 解压 → 双击 start.bat，浏览器自动打开，全程不需要安装任何东西。**
 
 1. 打开 [Releases 页面](https://github.com/Mengxingyu-cn/local-ai-notes/releases/latest)
-2. 下载最新的 **Windows 完整包**（文件名形如 `local-ai-notes-vX.X.X-windows-portable.zip`，内置了 Node.js，约 36MB）
+2. 下载最新的 **Windows 完整包**（文件名形如 `local-ai-notes-X.X.X-windows-portable.zip`，内置了 Node.js）
 3. 解压到你喜欢的任意文件夹
 4. 双击 `start.bat`，浏览器会自动打开应用（首次打开请先在右上角设置里配置 AI Key，纯笔记功能不需要）
 
@@ -132,7 +132,7 @@ npm start
 
 - **API Key 明文保存在本地** `data/settings.json`——只在你自己的电脑上使用，不要在共享账户/公共电脑上使用，不要把这个文件发给任何人。
 - 笔记内容**只在调用 AI 总结/复盘时**发送给你配置的 AI 厂商。
-- 复盘评判严格锚定笔记原文：提示词内置规则，笔记内容中的任何指令都不会被执行（防提示词注入）。
+- 笔记中的远程 Markdown 图片会在渲染时**自动加载**，访问图片所在网站（会连接外部网站，图片链接来源需自行确认）。
 
 ## 项目结构
 
