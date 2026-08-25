@@ -1,5 +1,8 @@
 'use strict';
 
+// 多篇聚合复盘的内容预算（字符），需与后端 review.js 的 GROUP_MAX 保持一致
+const REVIEW_BUDGET = 40000;
+
 /* ============================================================
    本地 AI 笔记 — 前端逻辑（零依赖，原生 JS）
    API 契约见任务说明：相对路径 fetch('/api/...')
@@ -45,22 +48,77 @@ function toast(msg, type = 'info', ms = 2800) {
   }, ms);
 }
 
-/** Promise 化确认框，返回 boolean */
-function confirmDialog(text, okLabel = '确定') {
+/** Promise 化确认框。
+ * 无 opts：返回 boolean（原行为）。
+ * opts.input：显示单个输入框，返回 {ok, value}。
+ * opts.checkboxes：[{id, label, checked}] 多选列表，返回 {ok, checked: [选中的 id]}。
+ */
+function confirmDialog(text, okLabel = '确定', opts = {}) {
   return new Promise((resolve) => {
     const dlg = $('#confirmDialog');
     $('#confirmText').textContent = text;
     $('#confirmOkBtn').textContent = okLabel;
+    const inputEl = $('#confirmInput');
+    const checksEl = $('#confirmChecks');
+    const hasInput = !!opts.input;
+    const hasChecks = Array.isArray(opts.checkboxes) && opts.checkboxes.length;
+    if (hasInput) {
+      inputEl.classList.remove('hidden');
+      inputEl.type = opts.type || 'number';
+      inputEl.value = opts.value != null ? opts.value : '';
+      inputEl.min = opts.min != null ? opts.min : '';
+      inputEl.max = opts.max != null ? opts.max : '';
+      inputEl.focus();
+      inputEl.select();
+    } else {
+      inputEl.classList.add('hidden');
+    }
+    if (hasChecks) {
+      checksEl.classList.remove('hidden');
+      checksEl.innerHTML = (opts.budget ? '<div class="confirm-stats" id="confirmStats"></div>' : '') +
+        opts.checkboxes.map((c, i) =>
+          '<label class="confirm-check"><input type="checkbox" data-i="' + i + '"' + (c.checked ? ' checked' : '') + '> ' +
+          esc(c.label) + '</label>'
+        ).join('');
+      // 勾选变化时动态统计所选内容量，超出预算时明确告知原因与结果（用 onchange 属性避免监听累积）
+      if (opts.budget) {
+        checksEl.onchange = () => {
+          const statsEl = $('#confirmStats', checksEl);
+          if (!statsEl) return;
+          const checked = opts.checkboxes.filter((c, i) => checksEl.querySelector('[data-i="' + i + '"]').checked);
+          const totalLen = checked.reduce((s, c) => s + (c.len || 0), 0);
+          const over = totalLen > opts.budget;
+          statsEl.className = 'confirm-stats' + (over ? ' warn' : '');
+          statsEl.textContent = '已选 ' + checked.length + ' 篇 · 内容 ' + totalLen + ' 字符 / 预算 ' + opts.budget + ' 字符' +
+            (over ? '（超出 ' + (totalLen - opts.budget) + ' 字符：超出的笔记不会被 AI 读取，建议分批复盘或减少选择）' : '');
+        };
+        checksEl.onchange();
+      } else {
+        checksEl.onchange = null;
+      }
+    } else {
+      checksEl.classList.add('hidden');
+      checksEl.innerHTML = '';
+      checksEl.onchange = null;
+    }
     dlg.classList.remove('hidden');
-    const done = (v) => { dlg.classList.add('hidden'); cleanup(); resolve(v); };
+    const collectChecked = () => opts.checkboxes
+      .filter((c, i) => checksEl.querySelector('[data-i="' + i + '"]').checked)
+      .map((c) => c.id);
+    const done = (v) => { dlg.classList.add('hidden'); inputEl.classList.add('hidden'); checksEl.classList.add('hidden'); cleanup(); resolve(v); };
     function cleanup() {
       $('#confirmOkBtn').onclick = null;
       $('#confirmCancelBtn').onclick = null;
       dlg.onclick = null;
+      inputEl.onkeydown = null;
     }
-    $('#confirmOkBtn').onclick = () => done(true);
-    $('#confirmCancelBtn').onclick = () => done(false);
-    dlg.onclick = (e) => { if (e.target === dlg) done(false); };
+    $('#confirmOkBtn').onclick = () => done(hasInput ? { ok: true, value: inputEl.value } : hasChecks ? { ok: true, checked: collectChecked() } : true);
+    $('#confirmCancelBtn').onclick = () => done(hasInput || hasChecks ? { ok: false } : false);
+    dlg.onclick = (e) => { if (e.target === dlg) done(hasInput || hasChecks ? { ok: false } : false); };
+    inputEl.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); done(hasInput ? { ok: true, value: inputEl.value } : hasChecks ? { ok: true, checked: collectChecked() } : true); }
+      if (e.key === 'Escape') { e.preventDefault(); done(hasInput || hasChecks ? { ok: false } : false); }
+    };
   });
 }
 
@@ -668,6 +726,18 @@ function showEmpty() {
   $('#exportBtn').disabled = true;
 }
 
+/** 右下角字符/词/行统计（基于 contentInput 实时值，O(n) 轻量计算） */
+function updateStats() {
+  const el = $('#editorStatsCount');
+  if (!el) return;
+  const text = $('#contentInput').value || '';
+  const chars = text.length;
+  const lines = text ? text.split('\n').length : 0;
+  // 词数：按空白与常见中英文标点切分（粗略统计，供参考）
+  const words = text ? text.split(/[\s,，。.!！?？;；:：、\n\r]+/).filter(Boolean).length : 0;
+  el.textContent = '字符 ' + chars + ' · 词 ' + words + ' · 行 ' + lines;
+}
+
 function showEditor() {
   $('#emptyState').classList.add('hidden');
   $('#editorView').classList.remove('hidden');
@@ -694,6 +764,7 @@ function fillEditor(note) {
   if (heavyRenderTimer) { clearTimeout(heavyRenderTimer); heavyRenderTimer = null; } // 大文档防抖定时器清理
   setMode('edit'); // 若已在 edit 会提前 return
   renderEditFromTextarea(null); // 无焦点加载：不置源码态（聚焦后按光标渲染）
+  updateStats(); // 切换笔记后刷新右下角统计
   state.dirty = false;
   state.lastSavedAt = null;
   updateSaveStatus();
@@ -720,6 +791,8 @@ function onEditorInput(e) {
   if (state.saveTimer) clearTimeout(state.saveTimer);
   state.saveTimer = setTimeout(saveCurrent, 1000);
   updateSaveStatus();
+  // 右下角字符/词/行统计实时更新
+  if (e && e.target === $('#contentInput')) updateStats();
   // 仅 contentInput 的输入触发编辑器重建（标题/标签输入不弹回编辑器光标）
   if (mode === 'edit' && e && e.target === $('#contentInput')) {
     // 大文档（>50KB）重建统一防抖（keydown/工具栏路径也纳入，避免每键 200ms+）
@@ -1612,19 +1685,35 @@ async function startReview() {
   }
   const groupNotes = state.notes.filter((n) => (n.tags || []).includes(tag));
   if (!groupNotes.length) { toast('该标签组下没有笔记', 'info'); return; }
-  const ok = await confirmDialog('即将对标签组「' + tag + '」进行复盘（共 ' + groupNotes.length + ' 篇笔记），是否开始？', '开始复盘');
-  if (!ok) return;
+  // 复盘前确认：多选要复盘的笔记（默认全选）；题数由 AI 根据所选笔记自动决定
+  const res = await confirmDialog(
+    '即将对标签组「' + tag + '」进行复盘。\n请选择要复盘的笔记（可多选）：',
+    '开始复盘',
+    {
+      budget: REVIEW_BUDGET, // 与后端 review.js GROUP_MAX 保持一致
+      checkboxes: groupNotes.map((n) => ({
+        id: n.id,
+        label: (n.title || '无标题') + (n.content && n.content.trim() ? '' : '（空）'),
+        checked: true,
+        len: (n.content || '').length, // 内容长度（字符），用于预算统计
+      })),
+    }
+  );
+  if (!res || !res.ok) return;
+  const pickedIds = res.checked || [];
+  if (!pickedIds.length) { toast('请至少选择一篇笔记', 'error'); return; }
   await flushSave(); // 冲刷防抖窗口内的输入，确保复盘基于最新笔记内容
 
   const btn = $('#reviewBtn');
   btn.disabled = true;
   btn.textContent = '⏳ 准备中…';
   try {
-    const data = await api('/api/ai/review/start', { method: 'POST', body: { tag } });
+    const data = await api('/api/ai/review/start', { method: 'POST', body: { tag, noteIds: pickedIds } });
     state.review = {
       sessionId: data.sessionId,
       question: data.question,
       qIndex: 1,
+      total: data.total || null, // AI 自动决定题数时无固定总数
       correctCount: 0,
       answered: 0,
       done: false,
@@ -1659,9 +1748,9 @@ function openReviewView() {
 function renderReviewQuestion() {
   const r = state.review;
   $('#reviewQuestionCard').innerHTML =
-    '<div class="review-q-label">问题 ' + r.qIndex + '</div>' +
+    '<div class="review-q-label">问题 ' + r.qIndex + (r.total ? ' / ' + r.total : '') + '</div>' +
     '<div class="review-q-text">' + esc(r.question || '（无问题内容）') + '</div>';
-  $('#reviewProgress').textContent = '第 ' + r.qIndex + ' 题 · 已答对 ' + r.correctCount + ' 题';
+  $('#reviewProgress').textContent = '第 ' + r.qIndex + (r.total ? ' / ' + r.total : '') + ' 题 · 已答对 ' + r.correctCount + ' 题';
   $('#reviewAnswerInput').value = '';
   $('#verdictArea').classList.add('hidden');
   $('#submitAnswerBtn').disabled = false;
@@ -1724,7 +1813,7 @@ function showVerdict(data) {
   $('#submitAnswerBtn').textContent = '提交回答';
 
   const r = state.review;
-  $('#reviewProgress').textContent = '第 ' + r.qIndex + ' 题 · 已答对 ' + r.correctCount + ' 题';
+  $('#reviewProgress').textContent = '第 ' + r.qIndex + (r.total ? ' / ' + r.total : '') + ' 题 · 已答对 ' + r.correctCount + ' 题';
   if (r.done) {
     $('#showReportBtn').classList.remove('hidden');
     $('#nextQuestionBtn').classList.add('hidden');
@@ -1985,7 +2074,7 @@ function showHistoryDetail(idx) {
 async function deleteHistoryItem() {
   const h = state.historyDetail;
   if (!h) return;
-  const ok = await confirmDialog('删除这条复盘记录？删除后不可恢复。', '删除');
+  const ok = await confirmDialog('删除这条复盘记录？删除后将进入回收站，可随时恢复。', '删除');
   if (!ok) return;
   try {
     await api('/api/review-history/' + h.id, { method: 'DELETE' });
@@ -2028,21 +2117,29 @@ async function loadTrashItems() {
 function renderTrashList() {
   const listEl = $('#trashList');
   const items = state.trash || [];
-  $('#trashCount').textContent = items.length ? '共 ' + items.length + ' 篇笔记' : '';
+  const noteCount = items.filter((x) => x.trashType !== 'review').length;
+  const reviewCount = items.length - noteCount;
+  $('#trashCount').textContent = items.length ? '共 ' + items.length + ' 条（笔记 ' + noteCount + ' · 复盘 ' + reviewCount + '）' : '';
   $('#trashClearBtn').classList.toggle('hidden', !items.length);
   if (!items.length) {
-    listEl.innerHTML = '<div class="trash-empty">回收站是空的<br>删除的笔记会先放到这里，可随时恢复（AI 总结一并保留）</div>';
+    listEl.innerHTML = '<div class="trash-empty">回收站是空的<br>删除的笔记和复盘记录会先放到这里，可随时恢复（AI 总结一并保留）</div>';
     return;
   }
   listEl.innerHTML = items.map((n, i) => {
     const d = new Date(n.deletedAt);
     const timeStr = isNaN(d.getTime()) ? '' : d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    const isReview = n.trashType === 'review';
     const hasSummary = !!(n.summary && n.summary.trim());
+    const badge = isReview
+      ? ' <span class="trash-summary-badge review">复盘记录</span>'
+      : (hasSummary ? ' <span class="trash-summary-badge">已总结</span>' : '');
+    const meta = isReview
+      ? '共 ' + (n.total || 0) + ' 题 · 正确率 ' + (n.accuracy || 0) + '%'
+      : '删除于 ' + esc(timeStr);
     return '<div class="trash-item">' +
       '<div class="trash-item-main">' +
-        '<div class="trash-item-title">' + esc(n.title || '无标题笔记') +
-          (hasSummary ? ' <span class="trash-summary-badge">已总结</span>' : '') + '</div>' +
-        '<div class="trash-item-time">删除于 ' + esc(timeStr) + '</div>' +
+        '<div class="trash-item-title">' + (isReview ? '📚 ' : '') + esc(n.noteTitle || n.title || '无标题') + badge + '</div>' +
+        '<div class="trash-item-time">' + meta + '</div>' +
       '</div>' +
       '<div class="trash-item-actions">' +
         '<button type="button" class="btn trash-restore" data-idx="' + i + '">恢复</button>' +
@@ -2062,7 +2159,13 @@ async function restoreTrashItem(idx) {
     const data = await api('/api/trash/' + n.id + '/restore', { method: 'POST' });
     state.trash = items.filter((x) => x.id !== n.id);
     renderTrashList();
-    // 恢复的笔记加入本地列表（不整表重拉，避免切走当前笔记）；summary 随笔记一并恢复
+    const isReview = n.trashType === 'review';
+    if (isReview) {
+      // 复盘记录恢复：已放回复盘历史（下次打开历史 Tab 自动刷新）；不加入笔记列表
+      toast('已恢复复盘记录「' + (n.noteTitle || '') + '」', 'success', 1600);
+      return;
+    }
+    // 笔记恢复：加入本地列表（不整表重拉，避免切走当前笔记）；summary 随笔记一并恢复
     const restored = (data && data.note) || n;
     if (!getNote(restored.id)) state.notes.push(restored);
     sortNotes();
@@ -2078,7 +2181,8 @@ async function purgeTrashItem(idx) {
   const items = state.trash || [];
   const n = items[idx];
   if (!n) return;
-  const ok = await confirmDialog('彻底删除「' + (n.title || '无标题') + '」？删除后不可恢复（包括 AI 总结）。', '彻底删除');
+  const title = (n.trashType === 'review' ? n.noteTitle : n.title) || '无标题';
+  const ok = await confirmDialog('彻底删除「' + title + '」？删除后不可恢复。', '彻底删除');
   if (!ok) return;
   try {
     await api('/api/trash/' + n.id, { method: 'DELETE' });

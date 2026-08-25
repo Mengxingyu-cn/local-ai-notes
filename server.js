@@ -13,6 +13,7 @@ const review = require('./review');
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const MAX_BODY = 5 * 1024 * 1024; // 5MB
+const TRASH_LIMIT = 200;          // 回收站容量上限：满时拒绝新删除（不覆盖既有内容）
 
 // ---------- 静态文件 ----------
 const MIME = {
@@ -206,12 +207,15 @@ function handleNotes(req, res, segments) {
       const notes = storage.loadNotes();
       const idx = notes.findIndex((n) => n.id === id);
       if (idx < 0) return sendJSON(res, 404, { error: '笔记不存在' });
+      // 回收站已满：拒绝删除并明确告知（不覆盖回收站中的既有内容）
+      const trash = storage.loadTrash();
+      if (trash.length >= TRASH_LIMIT) {
+        return sendJSON(res, 400, { error: `回收站已满（${TRASH_LIMIT} 条），请先清理回收站后再删除` });
+      }
       // 软删除：整体移入回收站（含 AI 总结 summary），不直接删除
       const [note] = notes.splice(idx, 1);
       note.deletedAt = Date.now();
-      const trash = storage.loadTrash();
       trash.unshift(note);
-      if (trash.length > 200) trash.length = 200; // 回收站容量上限，防无限增长
       storage.saveTrash(trash);
       storage.saveNotes(notes);
       return ok(res, { ok: true });
@@ -226,7 +230,9 @@ function handleTrash(req, res, segments) {
   if (segments.length === 0) {
     if (req.method === 'GET') {
       const trash = storage.loadTrash().sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0)); // 最新删除在前
-      return ok(res, { trash });
+      // 列表瘦身：复盘记录不返回完整答题详情（qa 体积大），避免列表接口变慢
+      const list = trash.map((x) => (x.trashType === 'review' ? Object.assign({}, x, { qa: undefined }) : x));
+      return ok(res, { trash: list });
     }
     return sendJSON(res, 405, { error: '方法不支持' });
   }
@@ -248,7 +254,26 @@ function handleTrash(req, res, segments) {
   if (restore && req.method === 'POST') {
     const trash = storage.loadTrash();
     const ti = trash.findIndex((n) => n.id === id);
-    if (ti < 0) return sendJSON(res, 404, { error: '回收站中没有此笔记' });
+    if (ti < 0) return sendJSON(res, 404, { error: '回收站中没有此记录' });
+    const rec = trash[ti];
+    // 复盘记录恢复：放回复盘历史（最新在前）
+    if (rec.trashType === 'review') {
+      const history = storage.loadReviewHistory();
+      if (history.some((h) => h.id === id)) {
+        // 查重幂等：已存在仅移除回收站条目
+        trash.splice(ti, 1);
+        storage.saveTrash(trash);
+        return ok(res, { ok: true });
+      }
+      const [record] = trash.splice(ti, 1);
+      delete record.deletedAt;
+      delete record.trashType;
+      history.unshift(record);
+      storage.saveTrash(trash);
+      storage.saveReviewHistory(history);
+      return ok(res, { ok: true, record });
+    }
+    // 笔记恢复：放回笔记列表
     const notes = storage.loadNotes();
     if (notes.some((n) => n.id === id)) {
       // 查重幂等：笔记已存在（并发/崩溃残留），仅从回收站移除，不重复添加
@@ -296,7 +321,17 @@ function handleReviewHistory(req, res, segments) {
 
   if (req.method === 'GET') return ok(res, { record: history[idx] });
   if (req.method === 'DELETE') {
-    history.splice(idx, 1);
+    // 回收站已满：拒绝并明确告知（不覆盖回收站既有内容）
+    const trash = storage.loadTrash();
+    if (trash.length >= TRASH_LIMIT) {
+      return sendJSON(res, 400, { error: `回收站已满（${TRASH_LIMIT} 条），请先清理回收站后再删除` });
+    }
+    // 软删除：复盘记录移入回收站（标记类型），可恢复；不直接删除
+    const [rec] = history.splice(idx, 1);
+    rec.deletedAt = Date.now();
+    rec.trashType = 'review';
+    trash.unshift(rec);
+    storage.saveTrash(trash);
     storage.saveReviewHistory(history);
     return ok(res, { ok: true });
   }

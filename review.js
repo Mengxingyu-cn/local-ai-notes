@@ -5,11 +5,21 @@ const crypto = require('crypto');
 const { callChatCompletion } = require('./ai');
 const { loadNotes, saveNotes, loadReviews, saveReviews, loadReviewHistory, saveReviewHistory } = require('./storage');
 
-const MAX_QUESTIONS = 8;      // 一轮复盘默认题数
-const MAX_NOTE_CHARS = 12000; // 笔记上下文截断，防超长
+const MAX_QUESTIONS = 8;      // 一轮复盘默认题数（兼容旧固定题数场景）
+const MIN_QUESTIONS = 1;
+const MAX_QUESTIONS_LIMIT = 50;
+const MAX_NOTE_CHARS = 12000; // 单篇笔记复盘上下文截断
+const GROUP_MAX = 40000;      // 多篇聚合总预算（字符），与前端确认弹窗的 REVIEW_BUDGET 保持一致
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 复盘会话 24 小时过期
 
-function buildSystemPrompt(noteContent, maxChars = MAX_NOTE_CHARS) {
+// 校验并归一化题数：非法/缺失回退默认，越界夹取到 [1, 50]
+function normalizeQuestionCount(v) {
+  const n = parseInt(v, 10);
+  if (isNaN(n) || n < 1) return MAX_QUESTIONS;
+  return Math.min(MAX_QUESTIONS_LIMIT, Math.max(MIN_QUESTIONS, n));
+}
+
+function buildSystemPrompt(noteContent, maxChars = MAX_NOTE_CHARS, maxQuestions = MAX_QUESTIONS) {
   const content = noteContent.length > maxChars
     ? noteContent.slice(0, maxChars) + '\n\n（笔记过长，已截断）'
     : noteContent;
@@ -41,7 +51,9 @@ function buildSystemPrompt(noteContent, maxChars = MAX_NOTE_CHARS) {
     '{"correct":"yes|partial|no","comment":"评判与纠正","reference":"笔记原文引用","next_question":"下一道题（若还有）"}',
     '',
     '## 结束条件',
-    `当已出满 ${MAX_QUESTIONS} 题时，next_question 置为空字符串 ""，并在 comment 末尾提示"本轮复盘结束，可以请求复盘报告"。`,
+    maxQuestions != null
+      ? `当已出满 ${maxQuestions} 题时，next_question 置为空字符串 ""，并在 comment 末尾提示"本轮复盘结束，可以请求复盘报告"。`
+      : '题数由你根据所选笔记的数量与内容量自动决定（建议 3-10 题），确保覆盖全部笔记的核心知识点；出完最后一道题时，next_question 置为空字符串 ""，并在 comment 末尾提示"本轮复盘结束，可以请求复盘报告"。',
   ].join('\n');
 }
 
@@ -132,42 +144,57 @@ async function callAI(settings, messages, temperature = 0.3) {
   });
 }
 
+// 聚合多篇笔记内容：按篇截断 + 总预算控制，附纳入说明（标签组/多选笔记共用）
+function buildGroupContent(notes, GROUP_MAX, perNote) {
+  let used = 0;
+  let included = 0;
+  const parts = [];
+  for (const n of notes) {
+    if (used >= GROUP_MAX) break;
+    const budget = Math.min(perNote, GROUP_MAX - used);
+    const body = String(n.content || '');
+    const sliced = body.length > budget ? body.slice(0, budget) + '\n\n（此笔记过长，已截断）' : body;
+    if (!sliced.trim()) continue; // 空内容笔记不占预算
+    parts.push(`## 笔记：《${n.title || '无标题'}》\n\n${sliced}`);
+    used += sliced.length;
+    included++;
+  }
+  if (!parts.length) return null;
+  if (included < notes.length) {
+    parts.push(`\n\n（共 ${notes.length} 篇笔记，已纳入 ${included} 篇，其余因内容过长未纳入）`);
+  }
+  return parts.join('\n\n---\n\n');
+}
+
 // 开始复盘：建会话并出第一题
-// 支持两种方式：单篇笔记（noteId）或标签组聚合（tag，取该标签下所有笔记内容）
+// 支持三种方式：单篇笔记（noteId）、标签组聚合（tag）、标签组内多选笔记（tag + noteIds）
 async function startReview(settings, opts) {
-  const { noteId, tag } = opts || {};
+  const { noteId, tag, noteIds, questions } = opts || {};
+  // 题数：传入数字 → 固定题数（兼容旧逻辑）；未传 → null，由 AI 根据所选笔记自动决定
+  const qCount = questions === undefined || questions === null ? null : normalizeQuestionCount(questions);
   let content = '';
   let sessionNoteId = null;
   let sessionNoteTitle = '';
 
-  if (tag) {
+  if (Array.isArray(noteIds)) {
+    if (!noteIds.length) throw Object.assign(new Error('请选择要复盘的笔记'), { statusCode: 400 });
+    // 多选笔记复盘：按传入顺序聚合，标题带标签名与篇数
+    const byId = new Map(loadNotes().map((n) => [n.id, n]));
+    const picked = noteIds.map((id) => byId.get(String(id))).filter(Boolean);
+    if (!picked.length) throw Object.assign(new Error('所选笔记不存在或已被删除'), { statusCode: 404 });
+    sessionNoteId = 'notes:' + picked.map((n) => n.id).join(',');
+    sessionNoteTitle = (tag ? '标签组：' + tag + '（' : '') + '选 ' + picked.length + ' 篇' + (tag ? '）' : '');
+    const perNote = Math.max(1500, Math.min(8000, Math.floor(GROUP_MAX / picked.length)));
+    content = buildGroupContent(picked, GROUP_MAX, perNote) || '';
+  } else if (tag) {
     const notes = loadNotes()
       .filter((n) => (n.tags || []).includes(tag))
       .sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0)); // 按时间正序，保持知识递进
     if (!notes.length) throw Object.assign(new Error('该标签组下没有笔记'), { statusCode: 404 });
     sessionNoteId = 'tag:' + tag;
     sessionNoteTitle = '标签组：' + tag;
-    // 聚合预算：标签组总预算 24000，按篇均分；单篇上限 8000，防止一篇巨文独占预算
-    const GROUP_MAX = MAX_NOTE_CHARS * 2;
-    const perNote = Math.max(2000, Math.min(8000, Math.floor(GROUP_MAX / notes.length)));
-    let used = 0;
-    let included = 0;
-    const parts = [];
-    for (const n of notes) {
-      if (used >= GROUP_MAX) break;
-      const budget = Math.min(perNote, GROUP_MAX - used);
-      const body = String(n.content || '');
-      const sliced = body.length > budget ? body.slice(0, budget) + '\n\n（此笔记过长，已截断）' : body;
-      if (!sliced.trim()) continue; // 空内容笔记不占预算
-      parts.push(`## 笔记：《${n.title || '无标题'}》\n\n${sliced}`);
-      used += sliced.length;
-      included++;
-    }
-    if (!parts.length) throw Object.assign(new Error('该标签组下笔记内容为空，请先写入内容'), { statusCode: 400 });
-    if (included < notes.length) {
-      parts.push(`\n\n（本组共 ${notes.length} 篇笔记，已纳入 ${included} 篇，其余因内容过长未纳入）`);
-    }
-    content = parts.join('\n\n---\n\n');
+    const perNote = Math.max(1500, Math.min(8000, Math.floor(GROUP_MAX / notes.length)));
+    content = buildGroupContent(notes, GROUP_MAX, perNote) || '';
   } else if (noteId) {
     const note = noteById(noteId);
     if (!note) throw Object.assign(new Error('笔记不存在'), { statusCode: 404 });
@@ -175,7 +202,7 @@ async function startReview(settings, opts) {
     sessionNoteTitle = note.title;
     content = note.content || '';
   } else {
-    throw Object.assign(new Error('缺少 noteId 或 tag'), { statusCode: 400 });
+    throw Object.assign(new Error('缺少 noteId、tag 或 noteIds'), { statusCode: 400 });
   }
   if (!content.trim()) throw Object.assign(new Error('复盘内容为空，请先写入笔记内容'), { statusCode: 400 });
 
@@ -187,9 +214,10 @@ async function startReview(settings, opts) {
     createdAt: Date.now(),
     updatedAt: Date.now(),
     askedCount: 0,
+    questions: qCount, // null = AI 自动决定题数；数字 = 固定题数（兼容旧会话）
     stats: { yes: 0, partial: 0, no: 0 },
     history: [
-      { role: 'system', content: buildSystemPrompt(content, tag ? MAX_NOTE_CHARS * 2 : MAX_NOTE_CHARS) },
+      { role: 'system', content: buildSystemPrompt(content, noteId ? MAX_NOTE_CHARS : GROUP_MAX, qCount) },
     ],
   };
   const raw = await callAI(settings, [
@@ -202,7 +230,7 @@ async function startReview(settings, opts) {
   session.history.push({ role: 'assistant', content: `【问题】${question}` });
   sessions[session.id] = session;
   persist(sessions);
-  return { sessionId: session.id, question, asked: session.askedCount, total: MAX_QUESTIONS, noteTitle: sessionNoteTitle };
+  return { sessionId: session.id, question, asked: session.askedCount, total: qCount, noteTitle: sessionNoteTitle };
 }
 
 // 提交回答：评判 + 出下一题
@@ -238,7 +266,7 @@ async function answerReview(settings, sessionId, userAnswer) {
     comment: parsed.comment || '（AI 未返回评语）',
     reference: parsed.reference || '',
   };
-  let nextQuestion = parsed.next_question || '';
+  let nextQuestion = String(parsed.next_question || '').trim();
 
   if (verdict.correct === 'yes') session.stats.yes += 1;
   else if (verdict.correct === 'partial') session.stats.partial += 1;
@@ -249,8 +277,12 @@ async function answerReview(settings, sessionId, userAnswer) {
     content: `【评判】${verdict.correct}|${verdict.comment}${verdict.reference ? '|引用：' + verdict.reference : ''}`,
   });
 
-  // 已满题数，或 AI 未给出下一题 → 本轮结束（不静默卡在同题）
-  let done = session.askedCount >= MAX_QUESTIONS || !nextQuestion;
+  // 完成判定：AI 未给出下一题 → 结束；固定题数会话（session.questions 数字）按题数结束；
+  // AI 自动决定题数（session.questions 为 null）时用硬上限兜底，防 AI 失控无限出题
+  const HARD_MAX_QUESTIONS = 30;
+  let done = !nextQuestion;
+  if (session.questions != null) done = done || session.askedCount >= session.questions;
+  else done = done || session.askedCount >= HARD_MAX_QUESTIONS;
   if (!done) {
     session.askedCount += 1;
     session.history.push({ role: 'assistant', content: `【问题】${nextQuestion}` });
@@ -265,7 +297,7 @@ async function answerReview(settings, sessionId, userAnswer) {
     nextQuestion,
     done,
     asked: session.askedCount,
-    total: MAX_QUESTIONS,
+    total: session.questions != null ? session.questions : null, // null = AI 自动决定题数
     stats: { ...session.stats },
   };
 }
