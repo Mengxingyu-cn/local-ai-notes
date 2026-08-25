@@ -34,7 +34,8 @@ jobs:
           $expected = (Select-String -Path SHASUMS256.txt -Pattern "node-$nodeVer-win-x64.zip").Line.Split(" ")[0]
           $actual = (Get-FileHash node-win-x64.zip -Algorithm SHA256).Hash.ToLower()
           if ($expected -ne $actual) { throw "SHA256 mismatch: expected $expected, got $actual" }
-          Expand-Archive node-win-x64.zip -DestinationPath node-extract -Force
+          # 解压到绝对路径（RUNNER_TEMP），供后续 Assemble 步骤使用
+          Expand-Archive node-win-x64.zip -DestinationPath "$env:RUNNER_TEMP\node-extract" -Force
 
       - name: Assemble package
         shell: pwsh
