@@ -112,7 +112,8 @@ function newSessionId() {
 }
 
 function getSessions() {
-  const sessions = loadReviews();
+  // null 原型对象：防 __proto__ 等特殊键被当成会话（500 噪音/污染）
+  const sessions = Object.assign(Object.create(null), loadReviews());
   // 清理过期会话（孤儿会话回收）
   const now = Date.now();
   let changed = false;
@@ -207,6 +208,10 @@ async function startReview(settings, opts) {
   if (!content.trim()) throw Object.assign(new Error('复盘内容为空，请先写入笔记内容'), { statusCode: 400 });
 
   const sessions = getSessions();
+  // 活跃复盘会话上限（防无界创建会话撑爆存储）
+  if (Object.keys(sessions).length >= 5) {
+    throw Object.assign(new Error('活跃复盘会话过多（最多 5 个），请先结束旧的复盘'), { statusCode: 400 });
+  }
   const session = {
     id: newSessionId(),
     noteId: sessionNoteId,
@@ -238,8 +243,12 @@ async function answerReview(settings, sessionId, userAnswer) {
   let sessions = getSessions();
   let session = sessions[sessionId];
   if (!session) throw Object.assign(new Error('复盘会话不存在或已过期，请重新开始'), { statusCode: 404 });
+  // 已完成/已结束的会话拒绝继续答题（防复盘状态机被无限续写撑爆）
+  if (session.done) throw Object.assign(new Error('本轮复盘已结束，请开始新一轮'), { statusCode: 400 });
+  if (String(userAnswer).length > 5000) throw Object.assign(new Error('回答过长（上限 5000 字符）'), { statusCode: 400 });
 
   session.history.push({ role: 'user', content: `我的回答：${userAnswer}（请评判并出下一道题，只输出 JSON）` });
+  persist(sessions); // 立即落盘：AI 调用后「重新加载会话」会丢弃未持久化的内存改动（否则错题回看拿不到答案）
 
   // 解析失败自动重试一次（同一上下文，明确要求只输出 JSON）
   let raw = await callAI(settings, [...session.history], 0.3);
@@ -283,6 +292,7 @@ async function answerReview(settings, sessionId, userAnswer) {
   let done = !nextQuestion;
   if (session.questions != null) done = done || session.askedCount >= session.questions;
   else done = done || session.askedCount >= HARD_MAX_QUESTIONS;
+  if (done) session.done = true; // 置结束标记：后续答题一律拒绝（防无界续写）
   if (!done) {
     session.askedCount += 1;
     session.history.push({ role: 'assistant', content: `【问题】${nextQuestion}` });

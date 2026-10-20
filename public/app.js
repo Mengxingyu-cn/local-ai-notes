@@ -4,7 +4,7 @@
 const REVIEW_BUDGET = 40000;
 
 /* ============================================================
-   本地 AI 笔记 — 前端逻辑（零依赖，原生 JS）
+   栖屿笔记 — 前端逻辑（零依赖，原生 JS）
    API 契约见任务说明：相对路径 fetch('/api/...')
    ============================================================ */
 
@@ -25,7 +25,7 @@ async function api(path, opts = {}) {
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     });
   } catch (e) {
-    throw new Error('网络错误，无法连接本地服务');
+    throw new Error('网络错误，无法连接服务器');
   }
   let data = null;
   try { data = await res.json(); } catch (e) { /* 空响应体 */ }
@@ -51,8 +51,8 @@ function toast(msg, type = 'info', ms = 2800) {
 /** Promise 化确认框。
  * 无 opts：返回 boolean（原行为）。
  * opts.input：显示单个输入框，返回 {ok, value}。
- * opts.checkboxes：[{id, label, checked}] 多选列表，返回 {ok, checked: [选中的 id]}。
- */
+ * opts.checkboxes：[{id, label, checked, len}] 多选列表，返回 {ok, checked: [选中的 id]}。
+ * opts.budget：多选时的内容预算统计（超出警告）。 */
 function confirmDialog(text, okLabel = '确定', opts = {}) {
   return new Promise((resolve) => {
     const dlg = $('#confirmDialog');
@@ -66,6 +66,7 @@ function confirmDialog(text, okLabel = '确定', opts = {}) {
       inputEl.classList.remove('hidden');
       inputEl.type = opts.type || 'number';
       inputEl.value = opts.value != null ? opts.value : '';
+      inputEl.placeholder = opts.placeholder || '';
       inputEl.min = opts.min != null ? opts.min : '';
       inputEl.max = opts.max != null ? opts.max : '';
       inputEl.focus();
@@ -161,7 +162,7 @@ function inlineMd(s) {
     return '\u0000CS' + (spans.length - 1) + '\u0000';
   });
   s = s
-    .replace(/!\[([^\]]*)\]\((https?:[^)\s]+)\)/g, '<img src="$2" alt="$1" loading="lazy">')
+    .replace(/!\[([^\]]*)\]\((https:[^)\s]+)\)/g, '<img src="$2" alt="$1" loading="lazy">')
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/\*([^*]+)\*/g, '<em>$1</em>');
@@ -330,6 +331,8 @@ const state = {
   toc: [],             // 当前笔记目录（{level,text,off}[]）
   tocSig: '',          // 目录签名（守卫：标题结构未变不重建）
   sortMode: localStorage.getItem('noteapp.sortMode') || 'time', // time | az | custom
+  summaryPendingId: null, // 从确认到请求完成共用一个锁，避免两个总结入口并发提交
+  summaryGenerating: false,
 };
 
 let lastEditEnd = 0;   // 覆盖编辑记忆的选区终点（配合 lastEditOffset）
@@ -356,7 +359,7 @@ function recordUndo(v, p, merge) {
   redoStack = [];
 }
 
-/** 统一写 textarea：赋值 + 光标 + 触发 input（渲染重建/自动保存） */
+/** 统一写 textarea：赋值 + 光标 + 触发 input（渲染重建 + 自动保存） */
 function setTaValue(ta, v, p) {
   ta.value = v;
   const pos = Math.max(0, Math.min(p != null ? p : v.length, v.length));
@@ -442,16 +445,34 @@ function filteredNotes() {
     );
 }
 
+function notePreview(content) {
+  // 列表只取少量纯文本；不解析 HTML，不将笔记内容作为可执行标记插入。
+  return String(content || '').slice(0, 2400)
+    .replace(/```[^\n]*\n?|~~~[^\n]*\n?/g, ' ')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/^\s{0,3}(?:#{1,6}\s+|>\s*|[-+*]\s+|\d+[.)]\s+)/gm, '')
+    .replace(/\[[ xX]\]\s*/g, '')
+    .replace(/[*_~`]/g, '')
+    .replace(/\s+/g, ' ').trim().slice(0, 120) || '还没有正文，写下第一句话…';
+}
+
 function renderNoteList() {
   const list = $('#noteList');
+  const count = $('#noteCount');
+  const notes = filteredNotes();
+  if (count) {
+    count.textContent = state.loaded ? String(notes.length) : '—';
+    count.setAttribute('aria-label', state.loaded ? '当前显示 ' + notes.length + ' 条，共 ' + state.notes.length + ' 条笔记' : '正在加载笔记');
+  }
   if (!state.loaded) {
     list.innerHTML = '<div class="skeleton"></div>'.repeat(6);
     return;
   }
-  const notes = filteredNotes();
   if (!notes.length) {
     list.innerHTML = '<div class="list-empty">' +
-      (state.notes.length ? '无匹配结果' : '暂无笔记，点击下方「新建笔记」') +
+      (state.notes.length ? '没有找到匹配的笔记，试试其他关键词或标签' : '还没有笔记，点击「新建笔记」开始记录') +
       '</div>';
     return;
   }
@@ -467,9 +488,10 @@ function renderNoteList() {
       (state.sortMode === 'custom' ? ' draggable="true" title="拖动可排序"' : '') + '>' +
       '<div class="note-item-main">' +
         '<div class="note-item-title">' + (title ? esc(title) : '<span class="untitled">无标题</span>') + '</div>' +
+        '<div class="note-item-preview">' + esc(notePreview(n.content)) + '</div>' +
         '<div class="note-item-meta">' + esc(relTime(n.updatedAt)) + tagChips + more + '</div>' +
       '</div>' +
-      '<button class="note-del" type="button" title="删除笔记">🗑</button>' +
+      '<button class="note-del" type="button" title="删除笔记" aria-label="删除笔记"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6"/></svg></button>' +
     '</div>';
   }).join('');
 
@@ -490,6 +512,14 @@ function renderNoteList() {
 }
 
 function renderTags() {
+  const filter = $('#tagFilter');
+  const summary = filter.querySelector('summary');
+  const filtered = state.activeTag !== '全部';
+  filter.classList.toggle('has-filter', filtered);
+  summary.title = '标签筛选：' + state.activeTag;
+  summary.setAttribute('aria-label', summary.title);
+  $('#noteListLabel').textContent = filtered ? state.activeTag : '我的笔记';
+  $('#noteListLabel').title = filtered ? '当前标签：' + state.activeTag : '我的笔记';
   const counts = new Map();
   state.notes.forEach((n) => (n.tags || []).forEach((t) => counts.set(t, (counts.get(t) || 0) + 1)));
   const tags = Array.from(counts.keys()).sort((a, b) => a.localeCompare(b, 'zh'));
@@ -507,6 +537,8 @@ function renderTags() {
       state.activeTag = b.dataset.tag;
       renderTags();
       renderNoteList();
+      filter.open = false;
+      summary.focus({ preventScroll: true });
     });
   });
   renderQuickTags(); // 侧边栏标签变化时同步编辑器快捷标签
@@ -518,7 +550,7 @@ function renderQuickTags() {
   if (!box) return;
   const all = Array.from(new Set(state.notes.flatMap((n) => n.tags || []))).sort((a, b) => a.localeCompare(b, 'zh'));
   if (!all.length) {
-    box.innerHTML = '<span class="qt-empty">暂无标签，可在下方输入框添加</span>';
+    box.innerHTML = '<span class="qt-empty">还没有标签，可以在标签输入框中添加</span>';
     return;
   }
   const current = new Set(parseTags($('#tagsInput').value));
@@ -608,6 +640,7 @@ function applySidebarPrefs() {
   // 移动端抽屉模式：不应用收起/宽度偏好（CSS 已隔离，这里双保险）
   if (window.matchMedia('(max-width: 768px)').matches) {
     $('#app').classList.remove('sidebar-collapsed');
+    syncCollapseBtn(false);
     return;
   }
   const w = parseInt(localStorage.getItem('noteapp.sidebarW'), 10);
@@ -623,9 +656,9 @@ function applySidebarPrefs() {
 
 function applyFontSize(size) {
   // 不传参：从 localStorage 读
-  if (size == null) size = parseInt(localStorage.getItem('noteapp.fontSize'), 10) || 15;
+  if (size == null) size = parseInt(localStorage.getItem('noteapp.fontSize'), 10) || 16;
   size = Math.max(12, Math.min(24, size));
-  const lineHeight = 1.75;
+  const lineHeight = 1.8;
   const blankH = 0; // 空行占位高度归零，段落间距由 CSS margin 控制（对齐 Typora）；光标可见性由 min-height 保证
   document.documentElement.style.setProperty('--editor-font-size', size + 'px');
   document.documentElement.style.setProperty('--editor-line-height', String(lineHeight));
@@ -635,7 +668,7 @@ function applyFontSize(size) {
 }
 
 function changeFontSize(delta) {
-  const cur = parseInt(localStorage.getItem('noteapp.fontSize'), 10) || 15;
+  const cur = parseInt(localStorage.getItem('noteapp.fontSize'), 10) || 16;
   applyFontSize(cur + delta);
 }
 
@@ -648,6 +681,12 @@ function initFontSize() {
 function syncCollapseBtn(collapsed) {
   $('#collapseBtn').title = collapsed ? '展开侧边栏' : '收起侧边栏';
   $('#collapseBtn').setAttribute('aria-label', collapsed ? '展开侧边栏' : '收起侧边栏');
+  const focusBtn = $('#focusBtn');
+  if (focusBtn) {
+    focusBtn.setAttribute('aria-pressed', String(collapsed));
+    focusBtn.title = collapsed ? '退出专注模式' : '进入专注模式';
+    focusBtn.setAttribute('aria-label', focusBtn.title);
+  }
 }
 
 function setSidebarCollapsed(collapsed) {
@@ -658,6 +697,7 @@ function setSidebarCollapsed(collapsed) {
 
 function initSidebar() {
   applySidebarPrefs();
+  initListDensity();
 
   $('#collapseBtn').addEventListener('click', () => {
     setSidebarCollapsed(!$('#app').classList.contains('sidebar-collapsed'));
@@ -691,6 +731,31 @@ function initSidebar() {
   });
 }
 
+function initListDensity() {
+  const shortWindow = window.matchMedia('(max-height: 800px)');
+  const menu = $('#densityMenu');
+  const names = { auto: '自动', comfortable: '舒适', compact: '紧凑' };
+  let preference = localStorage.getItem('noteapp.listDensity') || 'auto';
+  if (!Object.hasOwn(names, preference)) preference = 'auto';
+  const apply = () => {
+    const compact = preference === 'compact' || (preference === 'auto' && shortWindow.matches);
+    $('#sidebar').classList.toggle('compact-list', compact);
+    $('#sidebar').dataset.listDensity = preference;
+    menu.querySelector('summary').title = '列表密度：' + names[preference] + (preference === 'auto' ? '（当前' + (compact ? '紧凑' : '舒适') + '）' : '');
+    menu.querySelector('summary').setAttribute('aria-label', menu.querySelector('summary').title);
+    $$('[data-density]', menu).forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.density === preference)));
+  };
+  $$('[data-density]', menu).forEach((button) => button.addEventListener('click', () => {
+    preference = button.dataset.density;
+    localStorage.setItem('noteapp.listDensity', preference);
+    apply();
+    menu.open = false;
+    menu.querySelector('summary').focus({ preventScroll: true });
+  }));
+  shortWindow.addEventListener('change', apply);
+  apply();
+}
+
 /* ================= 笔记选择 / 视图切换 ================= */
 
 async function selectNote(id, opts = {}) {
@@ -719,35 +784,99 @@ async function selectNote(id, opts = {}) {
 }
 
 function showEmpty() {
+  hideSummary();
   $('#emptyState').classList.remove('hidden');
   $('#editorView').classList.add('hidden');
   $('#summarizeBtn').disabled = true;
   $('#reviewBtn').disabled = true;
   $('#exportBtn').disabled = true;
-}
-
-/** 右下角字符/词/行统计（基于 contentInput 实时值，O(n) 轻量计算） */
-function updateStats() {
-  const el = $('#editorStatsCount');
-  if (!el) return;
-  const text = $('#contentInput').value || '';
-  const chars = text.length;
-  const lines = text ? text.split('\n').length : 0;
-  // 词数：按空白与常见中英文标点切分（粗略统计，供参考）
-  const words = text ? text.split(/[\s,，。.!！?？;；:：、\n\r]+/).filter(Boolean).length : 0;
-  el.textContent = '字符 ' + chars + ' · 词 ' + words + ' · 行 ' + lines;
+  syncSummaryControls();
 }
 
 function showEditor() {
   $('#emptyState').classList.add('hidden');
   $('#editorView').classList.remove('hidden');
-  $('#summarizeBtn').disabled = false;
   $('#reviewBtn').disabled = false;
   $('#exportBtn').disabled = false;
+  syncSummaryControls();
 }
 
-function hideSummary() {
+let summaryReturnFocus = null;
+let summaryRequestSeq = 0; // 登录态重置时让旧请求失效，不占用新账号的总结入口。
+
+function syncSummaryPresentation() {
+  const panel = $('#summaryPanel');
+  const isDrawer = !panel.classList.contains('hidden') && window.matchMedia('(max-width: 1100px)').matches;
+  if (isDrawer) {
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+  } else {
+    panel.removeAttribute('role');
+    panel.removeAttribute('aria-modal');
+  }
+}
+
+function hideSummary(restoreFocus = false) {
+  const panel = $('#summaryPanel');
+  const focusWasInside = panel.contains(document.activeElement);
   $('#summaryPanel').classList.add('hidden');
+  $('#main').classList.remove('summary-open');
+  $('#summaryBackdrop')?.classList.add('hidden');
+  $('#summaryOpenBtn')?.setAttribute('aria-expanded', 'false');
+  syncSummaryPresentation();
+  if (restoreFocus && (focusWasInside || document.activeElement === document.body)) {
+    const openBtn = $('#summaryOpenBtn');
+    const fallback = openBtn && !openBtn.classList.contains('hidden') ? openBtn : $('#summarizeBtn');
+    const target = summaryReturnFocus && summaryReturnFocus.isConnected && !summaryReturnFocus.disabled && !summaryReturnFocus.closest('.hidden')
+      ? summaryReturnFocus : fallback;
+    if (target && !target.disabled) target.focus();
+  }
+}
+
+function syncSummaryControls() {
+  const note = getNote(state.currentId);
+  const editing = !!note && !state.review && !$('#editorView').classList.contains('hidden');
+  const pendingHere = state.summaryPendingId === state.currentId && state.summaryGenerating;
+  const busy = state.summaryPendingId !== null;
+  const btn = $('#summarizeBtn');
+  btn.disabled = !editing || busy;
+  // 只更新文字槽，保留新版按钮中的线性图标。
+  const label = btn.querySelector('.button-label') || btn.querySelector('span') || btn;
+  label.textContent = pendingHere ? '总结中…' : (note && note.summary ? '重新总结' : 'AI 总结');
+  btn.setAttribute('aria-label', label.textContent);
+  btn.title = label.textContent;
+  const openBtn = $('#summaryOpenBtn');
+  if (openBtn) {
+    openBtn.classList.toggle('hidden', !editing || !(note.summary || pendingHere));
+    openBtn.disabled = !editing;
+  }
+  const regenerateBtn = $('#summaryRegenerateBtn');
+  if (regenerateBtn) regenerateBtn.disabled = !editing || busy;
+}
+
+function showSummary(trigger = document.activeElement) {
+  if (!getNote(state.currentId) || state.review || $('#editorView').classList.contains('hidden')) return;
+  if ($('#summaryPanel').classList.contains('hidden')) summaryReturnFocus = trigger;
+  $('#summaryPanel').classList.remove('hidden');
+  $('#main').classList.add('summary-open');
+  $('#summaryBackdrop')?.classList.remove('hidden');
+  $('#summaryBody').classList.remove('hidden');
+  $('#summaryOpenBtn')?.setAttribute('aria-expanded', 'true');
+  syncSummaryPresentation();
+  $('#summaryToggle').title = '关闭 AI 总结';
+  $('#summaryToggle').setAttribute('aria-label', '关闭 AI 总结');
+  $('#summaryToggle').focus({ preventScroll: true });
+}
+
+function openSavedSummary() {
+  const note = getNote(state.currentId);
+  if (!note) return;
+  if (state.summaryPendingId === note.id && state.summaryGenerating) {
+    $('#summaryBody').innerHTML = '<div class="loading-dots" aria-label="正在生成总结"><span></span><span></span><span></span></div>';
+  } else if (note.summary) {
+    $('#summaryBody').innerHTML = renderMarkdown(note.summary);
+  } else return;
+  showSummary($('#summaryOpenBtn'));
 }
 
 function fillEditor(note) {
@@ -770,17 +899,9 @@ function fillEditor(note) {
   updateSaveStatus();
   renderQuickTags(); // 切换笔记后刷新快捷标签选中态
   toggleToc(false);   // 切换笔记后收起目录面板
-  // 已有 AI 总结：直接展示；无总结则隐藏面板
-  if (note.summary) {
-    $('#summaryPanel').classList.remove('hidden');
-    $('#summaryToggle').textContent = '收起';
-    $('#summaryBody').classList.remove('hidden');
-    $('#summaryBody').innerHTML = renderMarkdown(note.summary);
-    $('#summarizeBtn').textContent = '🔄 重新总结';
-  } else {
-    hideSummary();
-    $('#summarizeBtn').textContent = '✨ AI 总结';
-  }
+  // 已有总结保留入口，只有用户主动查看时才打开辅助面板。
+  hideSummary();
+  syncSummaryControls();
 }
 
 /* ================= 自动保存（1s 防抖） ================= */
@@ -826,7 +947,9 @@ async function saveCurrent(opts = {}) {
   updateSaveStatus();
   try {
     const saved = unwrapNote(await api('/api/notes/' + state.currentId, { method: 'PUT', body: payload }));
-    Object.assign(note, saved);
+    const fresh = getNote(state.currentId);
+    if (!fresh) return; // 保存期间笔记已被删除/退出登录：丢弃旧响应，防止覆盖新状态
+    Object.assign(fresh, saved);
     state.dirty = false;
     state.lastSavedAt = Date.now();
     sortNotes();
@@ -1001,7 +1124,7 @@ function htmlToMarkdown(root, anchorNode, anchorOffset) {
       md += '![' + (node.getAttribute('alt') || '') + '](' + (node.getAttribute('src') || '') + ')';
       if (caretOffset < 0 && anchorNode === node) caretOffset = md.length;
     } else if (tag === 'TABLE') {
-      // 表格往返：表头行 + 分隔行（全 ---）+ 数据行；cell 内行内标记通过 walk 保留
+      // 表格往返：表头行 + 分隔行（---） + 数据行；cell 内行内标记通过 walk 保留
       let headCells = [];
       const bodyRows = [];
       for (const c of node.childNodes) {
@@ -1359,7 +1482,11 @@ function syncFromRenderEdit() {
 function setMode(m) {
   if (m === mode) return; // 点已激活的 tab 无操作（防陈旧光标插入错位）
   mode = m;
-  $$('.mode-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
+  $$('.mode-btn').forEach((b) => {
+    const active = b.dataset.mode === m;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-selected', String(active));
+  });
   if (m === 'source') {
     syncFromRenderEdit(); // 编辑内容同步到 textarea（保底，输入路径已同步）
     $('#editorArea').classList.add('source-mode');
@@ -1590,7 +1717,7 @@ function toolbarInsert(md) {
   ta.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-/* ================= 导出 ================= */
+/* ================= 导出 / 字符统计 ================= */
 
 function downloadFile(filename, content, mime) {
   const blob = new Blob([content], { type: mime || 'text/markdown;charset=utf-8' });
@@ -1630,45 +1757,67 @@ async function exportAllNotes() {
   toast('已导出 ' + sorted.length + ' 篇笔记', 'success', 1600);
 }
 
+/** 右下角字符/词/行统计（基于 contentInput 实时值，O(n) 轻量计算） */
+function updateStats() {
+  const el = $('#editorStatsCount');
+  if (!el) return;
+  const text = $('#contentInput').value || '';
+  const chars = text.length;
+  const lines = text ? text.split('\n').length : 0;
+  // 词数：按空白与常见中英文标点切分（粗略统计，供参考）
+  const words = text ? text.split(/[\s,，。!！?？;；:：'"“”\n\r]+/).filter(Boolean).length : 0;
+  el.textContent = '字符 ' + chars + ' · 词 ' + words + ' · 行 ' + lines;
+}
+
 /* ================= AI 总结 ================= */
 
 async function summarize() {
-  const note = getNote(state.currentId);
-  if (!note) return;
-  if (!note.content || !note.content.trim()) { toast('这条笔记还没有内容，先写点东西吧', 'info'); return; }
-  // 已有总结：确认是否重新生成（不打断用户，确认后才继续）
-  if (note.summary) {
-    const ok = await confirmDialog('此笔记已经总结，是否重新生成总结？', '重新生成');
-    if (!ok) return;
-  }
-  await flushSave(); // 冲刷防抖窗口内的输入，确保总结基于最新内容（后端按保存后的内容总结）
+  if (state.summaryPendingId !== null || state.review) return;
   const targetId = state.currentId;
-  const prevSummary = note.summary || '';
-  const btn = $('#summarizeBtn');
-  btn.disabled = true;
-  btn.textContent = '⏳ 总结中…';
-  $('#summaryPanel').classList.remove('hidden');
-  $('#summaryBody').classList.remove('hidden');
-  $('#summaryToggle').textContent = '收起';
-  $('#summaryBody').innerHTML = '<div class="loading-dots"><span></span><span></span><span></span></div>';
+  const note = getNote(targetId);
+  if (!note) return;
+  const requestSeq = ++summaryRequestSeq;
+  let prevSummary = note.summary || '';
+  state.summaryPendingId = targetId;
+  syncSummaryControls();
   try {
+    // 两个生成入口共用同一确认与请求锁。
+    if (note.summary) {
+      const ok = await confirmDialog('此笔记已经总结，是否重新生成总结？', '重新生成');
+      if (!ok) return;
+    }
+    if (requestSeq !== summaryRequestSeq || state.currentId !== targetId || state.review) return;
+    await flushSave(); // 使用保存后的最新内容；保存失败时不提交旧内容给 AI。
+    if (requestSeq !== summaryRequestSeq || state.currentId !== targetId || state.review || getNote(targetId) !== note) return;
+    if (state.dirty) { toast('笔记尚未保存成功，请稍后再生成总结', 'info'); return; }
+    if (!note.content || !note.content.trim()) { toast('这条笔记还没有内容，先写点东西吧', 'info'); return; }
+    prevSummary = note.summary || '';
+    state.summaryGenerating = true;
+    syncSummaryControls();
+    $('#summaryBody').innerHTML = '<div class="loading-dots" aria-label="正在生成总结"><span></span><span></span><span></span></div>';
+    showSummary($('#summarizeBtn'));
     const data = await api('/api/ai/summarize', { method: 'POST', body: { noteId: targetId } });
+    if (requestSeq !== summaryRequestSeq || getNote(targetId) !== note) return;
     note.summary = data.summary || ''; // 同步本地状态（后端已持久化）
-    if (state.currentId !== targetId) return; // 总结期间切走了笔记，不污染当前面板
+    if (requestSeq !== summaryRequestSeq || state.currentId !== targetId || state.review || getNote(targetId) !== note) return;
+    // 用户已关闭或切换视图时，只更新内容与入口，不重新打开面板。
     $('#summaryBody').innerHTML = renderMarkdown(data.summary || '（没有返回内容）');
   } catch (e) {
-    if (state.currentId !== targetId) return;
+    if (requestSeq !== summaryRequestSeq || state.currentId !== targetId || state.review || getNote(targetId) !== note) return;
     // 生成失败：恢复旧总结（如有），避免 loading/错误态覆盖已保存内容
     if (prevSummary) {
       $('#summaryBody').innerHTML = renderMarkdown(prevSummary);
-      $('#summaryBody').classList.remove('hidden');
-      $('#summaryToggle').textContent = '收起';
+      toast('重新总结失败，已保留原总结：' + e.message, 'error');
     } else {
       $('#summaryBody').innerHTML = '<div class="error-box">总结失败：' + esc(e.message) + '</div>';
+      if ($('#summaryPanel').classList.contains('hidden')) toast('总结失败：' + e.message, 'error');
     }
   } finally {
-    btn.disabled = false;
-    btn.textContent = note.summary ? '🔄 重新总结' : '✨ AI 总结';
+    if (requestSeq === summaryRequestSeq) {
+      state.summaryPendingId = null;
+      state.summaryGenerating = false;
+      syncSummaryControls();
+    }
   }
 }
 
@@ -1677,10 +1826,17 @@ async function summarize() {
    状态全部集中在 state.review，视图是它的投影。 */
 
 async function startReview() {
+  if (state.review || $('#reviewBtn').disabled) return;
   // 按标签组复盘：当前选中的标签（"全部"时提示先选标签组）
   const tag = state.activeTag === '全部' ? '' : state.activeTag;
   if (!tag) {
     toast('请先在侧边栏选择一个标签组，再开始复盘', 'info');
+    const tagFilter = $('#tagFilter');
+    if (tagFilter) tagFilter.open = true;
+    if (window.matchMedia('(max-width: 768px)').matches) toggleSidebar(true);
+    else setSidebarCollapsed(false);
+    const firstTag = $('#tagList .tag-chip:not([data-tag="全部"])') || tagFilter?.querySelector('summary');
+    firstTag?.focus({ preventScroll: true });
     return;
   }
   const groupNotes = state.notes.filter((n) => (n.tags || []).includes(tag));
@@ -1705,8 +1861,9 @@ async function startReview() {
   await flushSave(); // 冲刷防抖窗口内的输入，确保复盘基于最新笔记内容
 
   const btn = $('#reviewBtn');
+  const label = btn.querySelector('span') || btn;
   btn.disabled = true;
-  btn.textContent = '⏳ 准备中…';
+  label.textContent = '准备中…';
   try {
     const data = await api('/api/ai/review/start', { method: 'POST', body: { tag, noteIds: pickedIds } });
     state.review = {
@@ -1726,12 +1883,13 @@ async function startReview() {
   } catch (e) {
     toast('开始复盘失败：' + e.message, 'error');
   } finally {
-    btn.disabled = false;
-    btn.textContent = '🧠 开始复盘';
+    btn.disabled = !!state.review || !getNote(state.currentId);
+    label.textContent = '开始复盘';
   }
 }
 
 function openReviewView() {
+  hideSummary();
   $('#editorView').classList.add('hidden');
   $('#emptyState').classList.add('hidden');
   $('#reviewView').classList.remove('hidden');
@@ -1739,6 +1897,7 @@ function openReviewView() {
   $('#reviewQuestionStage').classList.remove('hidden');
   $('#summarizeBtn').disabled = true;
   $('#reviewBtn').disabled = true;
+  syncSummaryControls();
   const note = getNote(state.currentId);
   const title = (state.review && state.review.noteTitle) || (note ? note.title : '') || '';
   $('#reviewNoteTitle').textContent = title ? '「' + title + '」' : '';
@@ -1889,6 +2048,17 @@ function showReportView() {
   }
 }
 
+async function requestCloseReview() {
+  if ($('#endReviewBtn').disabled) return;
+  if (state.report || !state.review) { closeReviewView(); return; }
+  const r = state.review;
+  if (r.answered > 0) {
+    const ok = await confirmDialog('当前已答 ' + r.answered + ' 题，结束并关闭复盘？', '结束');
+    if (!ok) return;
+  }
+  await endReview(false);
+}
+
 function closeReviewView() {
   $('#reviewView').classList.add('hidden');
   $('#reviewQuestionStage').classList.remove('hidden');
@@ -1901,11 +2071,28 @@ function closeReviewView() {
 
 /* ================= 设置 ================= */
 
-async function openSettings() {
+let settingsReturnFocus = null;
+
+function closeActionMenus(restoreFocus = false) {
+  ['noteActionsMenu', 'tagFilter', 'densityMenu'].forEach((id) => {
+    const menu = $('#' + id);
+    if (!menu || !menu.open) return;
+    const containedFocus = menu.contains(document.activeElement);
+    menu.open = false;
+    if (restoreFocus && containedFocus) menu.querySelector('summary')?.focus();
+  });
+}
+
+async function openSettings(tab = 'api') {
+  if (!['api', 'history', 'trash', 'guide'].includes(tab)) tab = 'api';
+  settingsReturnFocus = document.activeElement;
+  closeActionMenus();
+  if (window.matchMedia('(max-width: 768px)').matches) toggleSidebar(false);
   state.clearKey = false;
   $('#clearKeyBtn').disabled = false;
   $('#settingsModal').classList.remove('hidden');
-  switchSettingsTab('api'); // 每次打开默认回到 API 设置 Tab
+  switchSettingsTab(tab);
+  $('#closeSettingsBtn').focus({ preventScroll: true });
 
   const saveBtn = $('#saveSettingsBtn');
   saveBtn.disabled = true;
@@ -1946,22 +2133,45 @@ async function openSettings() {
   }
 }
 
+/* ================= 使用说明 ================= */
+
+// 内置默认说明在服务端（server.js 的 DEFAULT_GUIDE）：管理员未自定义时接口直接返回它，
+// 编辑器预填、用户端展示同源，前端不做第二份默认文案
+async function loadGuide() {
+  const box = $('#guideContent');
+  box.innerHTML = '<div class="guide-loading">加载中…</div>';
+  try {
+    const data = await api('/api/guide');
+    box.innerHTML = renderMarkdown(data.content || ''); // 复用笔记渲染管线（片段级 esc 转义）
+  } catch (e) {
+    box.innerHTML = '<div class="guide-loading">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
 function closeSettings() {
   $('#settingsModal').classList.add('hidden');
   state.clearKey = false;
   $('#apiKeyInput').value = '';
-  // 关闭时重置各 Tab 视图状态，下次打开重新从 API Tab 开始
+  // 关闭时重置各 Tab 视图状态；下次按入口选择对应页面。
   state.history = null;
   state.historyDetail = null;
   state.trash = null;
   $('#historyDetail').classList.add('hidden');
   $('#historyList').classList.remove('hidden');
+  if (settingsReturnFocus && settingsReturnFocus.isConnected) {
+    const closedMenu = settingsReturnFocus.closest('details:not([open])');
+    const hiddenSidebar = settingsReturnFocus.closest('#sidebar') && window.matchMedia('(max-width: 768px)').matches && !$('#sidebar').classList.contains('open');
+    const target = hiddenSidebar ? $('#menuBtn') : (closedMenu ? closedMenu.querySelector('summary') : settingsReturnFocus);
+    if (target) target.focus({ preventScroll: true });
+  }
 }
 
 /* ================= 设置 Tab 切换（API 设置 / 复盘历史记录） ================= */
 
 function switchSettingsTab(tab) {
   const isApi = tab === 'api';
+  const titles = { api: 'AI 设置', history: '复盘历史', trash: '回收站', guide: '使用说明' };
+  $('#settingsTitle').textContent = titles[tab] || '设置';
   $$('.settings-tab').forEach((b) => {
     const active = b.dataset.tab === tab;
     b.classList.toggle('active', active);
@@ -1970,6 +2180,7 @@ function switchSettingsTab(tab) {
   $('#apiSettingsPanel').classList.toggle('hidden', !isApi);
   $('#historyPanel').classList.toggle('hidden', tab !== 'history');
   $('#trashPanel').classList.toggle('hidden', tab !== 'trash');
+  $('#guidePanel').classList.toggle('hidden', tab !== 'guide');
   // footer 按钮：仅 API Tab 显示 测试连接/保存；取消（关闭弹窗）始终可用
   $('#testConnBtn').classList.toggle('hidden', !isApi);
   $('#saveSettingsBtn').classList.toggle('hidden', !isApi);
@@ -1980,6 +2191,8 @@ function switchSettingsTab(tab) {
     loadReviewHistory(); // 切到历史 Tab 时懒加载列表
   } else if (tab === 'trash') {
     loadTrashItems(); // 切到回收站 Tab 时懒加载列表
+  } else if (tab === 'guide') {
+    loadGuide(); // 每次切到说明 Tab 都重新拉取，保证与最新内容一致
   }
 }
 
@@ -2054,7 +2267,7 @@ function showHistoryDetail(idx) {
     '<div class="history-section"><div class="history-section-title">薄弱点</div>' +
       (weak.length ? weak.map((w) => '<div class="history-chip">' + esc(w) + '</div>').join('') : '<div class="muted">暂无薄弱点，继续保持！</div>') +
     '</div>' +
-    // 答题详情（错题回看）：每题展示问题/回答/评判/评语/原文引用
+    // 答题详情（错题回看）：每题展示问题/回答/评判/原文引用
     (h.qa && h.qa.length ? '<div class="history-section"><div class="history-section-title">答题详情（共 ' + h.qa.length + ' 题）</div>' +
       h.qa.map((q, qi) => {
         const vLabel = q.verdict === 'yes' ? '✅ 正确' : (q.verdict === 'partial' ? '⚠️ 部分正确' : '❌ 错误');
@@ -2298,6 +2511,7 @@ async function testConnection() {
 function toggleSidebar(open) {
   $('#sidebar').classList.toggle('open', open);
   $('#sidebarBackdrop').classList.toggle('hidden', !open);
+  $('#menuBtn').setAttribute('aria-expanded', String(open));
 }
 
 /* ================= 事件绑定 & 启动 ================= */
@@ -2331,11 +2545,35 @@ function bindEvents() {
     toggleSidebar(!$('#sidebar').classList.contains('open'));
   });
   $('#sidebarBackdrop').addEventListener('click', () => toggleSidebar(false));
+  $('#focusBtn')?.addEventListener('click', () => {
+    if (window.matchMedia('(max-width: 768px)').matches) {
+      toggleSidebar(false);
+      return;
+    }
+    setSidebarCollapsed(!$('#app').classList.contains('sidebar-collapsed'));
+  });
+  $('#notesNavBtn')?.addEventListener('click', async () => {
+    if (!$('#reviewView').classList.contains('hidden')) await requestCloseReview();
+    if (state.review) return; // 取消结束复盘时保留当前视图及筛选条件。
+    state.query = '';
+    $('#searchInput').value = '';
+    state.activeTag = '全部';
+    renderTags();
+    renderNoteList();
+    if (window.matchMedia('(max-width: 768px)').matches) toggleSidebar(false);
+    if (getNote(state.currentId)) showEditor();
+    else showEmpty();
+    if (getNote(state.currentId)) $('#titleInput').focus({ preventScroll: true });
+  });
+  [
+    ['historyNavBtn', 'history'], ['trashNavBtn', 'trash'],
+    ['guideNavBtn', 'guide'],
+  ].forEach(([id, tab]) => $('#' + id)?.addEventListener('click', () => openSettings(tab)));
 
   ['titleInput', 'contentInput', 'tagsInput'].forEach((id) => {
     $('#' + id).addEventListener('input', onEditorInput);
   });
-  // 源码模式：textarea 焦点时的 Ctrl+Z/Ctrl+Y 也用自定义撤销栈（程序化赋值同样破坏原生 undo）
+  // 源码模式：textarea 聚焦时的 Ctrl+Z/Ctrl+Y 也用自定义撤销栈（程序化赋值同样破坏原生 undo）
   $('#contentInput').addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) {
       e.preventDefault();
@@ -2559,10 +2797,21 @@ function bindEvents() {
   });
 
   $('#summarizeBtn').addEventListener('click', summarize);
+  $('#summaryOpenBtn')?.addEventListener('click', openSavedSummary);
+  $('#summaryRegenerateBtn')?.addEventListener('click', summarize);
+  $('#summaryBackdrop')?.addEventListener('click', () => hideSummary(true));
+  window.matchMedia('(max-width: 1100px)').addEventListener('change', () => {
+    syncSummaryPresentation();
+    const panel = $('#summaryPanel');
+    if (panel.getAttribute('aria-modal') === 'true' && !panel.contains(document.activeElement) &&
+        ['confirmDialog', 'settingsModal'].every((id) => $('#' + id).classList.contains('hidden'))) {
+      $('#summaryToggle').focus({ preventScroll: true });
+    }
+  });
   $('#reviewBtn').addEventListener('click', startReview);
   $('#exportBtn').addEventListener('click', exportNote);
   $('#exportAllBtn').addEventListener('click', exportAllNotes);
-  $('#settingsBtn').addEventListener('click', openSettings);
+  $('#settingsBtn').addEventListener('click', () => openSettings('api'));
 
   // 目录
   $('#tocBtn').addEventListener('click', () => toggleToc());
@@ -2572,24 +2821,14 @@ function bindEvents() {
     if (item) tocJump(parseInt(item.dataset.tocIdx, 10));
   });
 
-  $('#summaryToggle').addEventListener('click', () => {
-    const hidden = $('#summaryBody').classList.toggle('hidden');
-    $('#summaryToggle').textContent = hidden ? '展开' : '收起';
-  });
+  $('#summaryToggle').addEventListener('click', () => hideSummary(true));
 
   // 复盘
   $('#submitAnswerBtn').addEventListener('click', submitAnswer);
   $('#nextQuestionBtn').addEventListener('click', nextQuestion);
   $('#showReportBtn').addEventListener('click', () => endReview(true));
   $('#endReviewBtn').addEventListener('click', () => endReview(true));
-  $('#closeReviewBtn').addEventListener('click', async () => {
-    const r = state.review;
-    if (r && r.answered > 0) {
-      const ok = await confirmDialog('当前已答 ' + r.answered + ' 题，结束并关闭复盘？', '结束');
-      if (!ok) return;
-    }
-    endReview(false);
-  });
+  $('#closeReviewBtn').addEventListener('click', requestCloseReview);
   $('#reportCloseBtn').addEventListener('click', closeReviewView);
   $('#referenceToggle').addEventListener('click', () => {
     const hidden = $('#referenceBody').classList.toggle('hidden');
@@ -2618,11 +2857,51 @@ function bindEvents() {
     if (e.target === $('#settingsModal')) closeSettings();
   });
 
+  // 在目标动作之前处理外部点击，避免关掉该动作刚打开的引导面板。
+  document.addEventListener('click', (e) => {
+    ['noteActionsMenu', 'tagFilter', 'densityMenu'].forEach((id) => {
+      const menu = $('#' + id);
+      if (menu?.open && !menu.contains(e.target)) menu.open = false;
+    });
+  }, true);
+  // 原生 details 负责开关，选择菜单动作后收起。
+  document.addEventListener('click', (e) => {
+    ['noteActionsMenu', 'tagFilter', 'densityMenu'].forEach((id) => {
+      const menu = $('#' + id);
+      if (!menu || !menu.open) return;
+      if (menu.contains(e.target) && e.target.closest('button, a')) menu.open = false;
+    });
+  });
+
   // 全局键盘
   document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
-    if (!$('#settingsModal').classList.contains('hidden')) closeSettings();
-    else if (!$('#confirmDialog').classList.contains('hidden')) $('#confirmCancelBtn').click();
+    // 窄屏总结是遮罩抽屉；Tab 留在抽屉内，宽屏并排阅读不限制焦点。
+    const summaryPanel = $('#summaryPanel');
+    if (e.key === 'Tab' && !e.defaultPrevented && !summaryPanel.classList.contains('hidden') &&
+        window.matchMedia('(max-width: 1100px)').matches &&
+        ['confirmDialog', 'settingsModal'].every((id) => $('#' + id).classList.contains('hidden'))) {
+      const focusable = $$('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]', summaryPanel)
+        .filter((el) => el.tabIndex >= 0 && el.getClientRects().length && !el.closest('.hidden'));
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !summaryPanel.contains(document.activeElement) ||
+          (e.shiftKey && document.activeElement === first) || (!e.shiftKey && document.activeElement === last)) {
+        e.preventDefault();
+        (e.shiftKey ? last || summaryPanel : first || summaryPanel).focus({ preventScroll: true });
+      }
+      return;
+    }
+    if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+    if (!$('#confirmDialog').classList.contains('hidden')) $('#confirmCancelBtn').click();
+    else if (!$('#settingsModal').classList.contains('hidden')) closeSettings();
+    else if (['noteActionsMenu', 'tagFilter', 'densityMenu'].some((id) => $('#' + id)?.open)) closeActionMenus(true);
+    else if (!$('#summaryPanel').classList.contains('hidden')) hideSummary(true);
+    else if ($('#sidebar').classList.contains('open')) {
+      toggleSidebar(false);
+      $('#menuBtn').focus();
+    }
+    else return;
+    e.preventDefault();
   });
 }
 

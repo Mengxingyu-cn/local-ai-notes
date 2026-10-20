@@ -1,7 +1,8 @@
-// storage.js — JSON 文件存储（零依赖，原子写）
+// storage.js — JSON 文件存储（零依赖，原子写；API Key 加密落盘）
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const DATA_DIR = path.join(__dirname, 'data');
 
@@ -52,11 +53,80 @@ const DEFAULT_SETTINGS = {
   model: 'deepseek-v4-flash',
   apiKey: ''
 };
+
+// ---- API Key 加密（AES-256-GCM，密钥存 data/.secret，首次启动生成；与云端版同源） ----
+let secretKey = null; // null=未加载
+
+function getSecretKey() {
+  if (secretKey !== null) return secretKey;
+  try {
+    const file = path.join(DATA_DIR, '.secret');
+    if (fs.existsSync(file)) {
+      const k = fs.readFileSync(file, 'utf8').trim();
+      if (k.length === 64) { secretKey = k; return secretKey; }
+      console.error('[storage] .secret 文件格式无效，将重新生成（已有加密的 Key 将无法解密）');
+    }
+    const key = crypto.randomBytes(32).toString('hex');
+    ensureDataDir();
+    fs.writeFileSync(file, key, { encoding: 'utf8', mode: 0o600 });
+    secretKey = key;
+    return secretKey;
+  } catch (e) {
+    console.error('[storage] 无法创建加密密钥文件（API Key 将明文存储）:', e.message);
+    secretKey = '';
+    return secretKey;
+  }
+}
+
+/** 加密 API Key（空值原样返回；无密钥时明文存储并告警） */
+function encryptSecret(plain) {
+  if (!plain) return plain;
+  const key = getSecretKey();
+  if (!key) return plain;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(key, 'hex'), iv);
+  const enc = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return 'enc:v1:' + iv.toString('base64') + ':' + tag.toString('base64') + ':' + enc.toString('base64');
+}
+
+/** 解密 API Key（非 enc: 前缀的旧明文原样返回，兼容历史 settings.json） */
+function decryptSecret(stored) {
+  const s = String(stored || '');
+  if (!s.startsWith('enc:v1:')) return stored;
+  const key = getSecretKey();
+  if (!key) return ''; // 密钥文件丢失：无法解密，视为未配置 Key
+  try {
+    const parts = s.split(':');
+    if (parts.length < 5) return '';
+    const iv = Buffer.from(parts[2], 'base64');
+    const tag = Buffer.from(parts[3], 'base64');
+    const data = Buffer.from(parts.slice(4).join(':'), 'base64');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', Buffer.from(key, 'hex'), iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+  } catch (e) {
+    console.error('[storage] API Key 解密失败:', e.message);
+    return '';
+  }
+}
+
 function loadSettings() {
-  return Object.assign({}, DEFAULT_SETTINGS, loadJSON('settings.json', {}));
+  const s = Object.assign({}, DEFAULT_SETTINGS, loadJSON('settings.json', {}));
+  if (s.apiKey) s.apiKey = decryptSecret(s.apiKey);
+  return s;
 }
 function saveSettings(s) {
-  saveJSON('settings.json', s);
+  const out = Object.assign({}, s);
+  if (out.apiKey) {
+    const enc = encryptSecret(out.apiKey);
+    if (enc === out.apiKey) {
+      // 加密失败（.secret 不可用）：拒绝明文落盘，宁可不保存也不泄露 Key
+      throw new Error('无法加密 API Key（加密密钥不可用），已拒绝保存；请检查数据目录权限');
+    }
+    out.apiKey = enc;
+  }
+  saveJSON('settings.json', out);
 }
 
 // ---- 复盘会话 ----
@@ -86,4 +156,4 @@ function saveTrash(trash) {
   saveJSON('trash.json', { trash });
 }
 
-module.exports = { loadNotes, saveNotes, loadSettings, saveSettings, loadReviews, saveReviews, loadReviewHistory, saveReviewHistory, loadTrash, saveTrash };
+module.exports = { DATA_DIR, loadNotes, saveNotes, loadSettings, saveSettings, loadReviews, saveReviews, loadReviewHistory, saveReviewHistory, loadTrash, saveTrash };

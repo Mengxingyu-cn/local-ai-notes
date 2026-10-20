@@ -4,72 +4,117 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>本地 AI 笔记</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📝</text></svg>">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#346457">
+<meta name="description" content="本地 AI 笔记：随手记录、整理知识，用 AI 总结和提问式复盘加深理解。数据保存在本机。">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <div id="app">
 
-  <!-- ============ 左侧边栏 ============ -->
-  <aside id="sidebar">
+  <!-- 导航与笔记列表 -->
+  <aside id="sidebar" aria-label="笔记导航">
     <div class="sidebar-header">
-      <div class="logo">📝 <span>本地 AI 笔记</span></div>
-      <button id="collapseBtn" class="icon-btn sidebar-collapse-btn" type="button" title="收起侧边栏" aria-label="收起侧边栏">«</button>
+      <div class="logo"><span class="brand-mark"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 4c-8-1-15 2-15 9a6 6 0 0 0 6 6c7 0 10-7 9-15Z"/><path d="M4 21 15 10"/></svg></span><span class="brand-wordmark">本地 AI 笔记<small>记录 · 整理 · 复盘</small></span></div>
+      <button id="collapseBtn" class="icon-btn sidebar-collapse-btn" type="button" title="收起侧边栏" aria-label="收起侧边栏"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
     </div>
+    <div class="sidebar-create"><button id="newNoteBtn" class="btn primary new-note-btn" type="button"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新建笔记</span><span class="new-note-hint">记录此刻</span></button></div>
+    <nav class="workspace-nav" aria-label="工作区">
+      <button id="notesNavBtn" class="nav-btn active" type="button"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6c-3-2-6-2-9-1v15c3-1 6-1 9 1 3-2 6-2 9-1V5c-3-1-6-1-9 1Z"/><path d="M12 6v15"/></svg><span>全部笔记</span></button>
+      <button id="historyNavBtn" class="nav-btn" type="button"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.6 7M3 4v7h7M12 7v5l3 2"/></svg><span>复盘历史</span></button>
+    </nav>
     <div class="search-wrap">
-      <input id="searchInput" type="search" placeholder="搜索笔记…" autocomplete="off">
+      <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+      <input id="searchInput" type="search" placeholder="搜索标题或正文…" aria-label="搜索笔记标题或正文" autocomplete="off">
     </div>
-    <div class="sort-bar">
-      <label for="sortSelect" class="sort-label">排序</label>
-      <select id="sortSelect" class="sort-select" title="笔记排序方式">
-        <option value="time">按时间</option>
-        <option value="az">按名称 A-Z</option>
-        <option value="custom">自定义（拖动排序）</option>
-      </select>
+    <div class="list-heading">
+      <span class="list-label"><span id="noteListLabel">我的笔记</span><span id="noteCount" class="note-count">0</span></span>
+      <div class="sort-bar">
+        <label for="sortSelect" class="sr-only">笔记排序</label>
+        <select id="sortSelect" class="sort-select" title="笔记排序方式">
+          <option value="time">最近更新</option>
+          <option value="az">名称 A–Z</option>
+          <option value="custom">手动排序</option>
+        </select>
+      </div>
+      <details id="tagFilter" class="tag-section">
+        <summary class="icon-btn tag-title" title="标签筛选：全部" aria-label="标签筛选：全部"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16l-6 7v6l-4 2v-8Z"/></svg></summary>
+        <div class="tag-popover"><div class="popover-heading">按标签筛选</div><div id="tagList" class="tag-list"></div></div>
+      </details>
+      <details id="densityMenu" class="density-menu">
+        <summary class="icon-btn" title="列表密度：自动" aria-label="列表密度：自动"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><path d="m9 3 3 3-3 3m6 6-3 3 3 3"/></svg></summary>
+        <div class="dropdown-menu density-dropdown" role="group" aria-label="列表密度">
+          <div class="popover-heading">列表密度</div>
+          <button type="button" data-density="auto" aria-pressed="true"><span>自动</span><small>根据窗口高度调整</small></button>
+          <button type="button" data-density="comfortable" aria-pressed="false"><span>舒适</span><small>显示正文预览</small></button>
+          <button type="button" data-density="compact" aria-pressed="false"><span>紧凑</span><small>同时浏览更多笔记</small></button>
+        </div>
+      </details>
     </div>
-    <div class="tag-section">
-      <div class="tag-title">标签</div>
-      <div id="tagList" class="tag-list"></div>
+    <div id="noteList" class="note-list" aria-label="笔记列表"></div>
+    <div class="sidebar-footer">
+      <div class="sidebar-utilities">
+        <button id="trashNavBtn" title="回收站" aria-label="回收站" class="utility-btn" type="button"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg><span>回收站</span></button>
+        <button id="guideNavBtn" title="使用说明" aria-label="使用说明" class="utility-btn" type="button"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4M12 17h.01"/></svg><span>使用说明</span></button>
+        <button id="settingsBtn" title="设置" aria-label="设置" class="utility-btn" type="button"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 3-1 3-3 1-2 3 2 2-1 3 3 2 1 3h4l1-3 3-1 2-3-2-2 1-3-3-2-1-3Z"/><circle cx="10" cy="11.5" r="3"/></svg><span>设置</span></button>
+      </div>
     </div>
-    <div id="noteList" class="note-list"></div>
-    <button id="exportAllBtn" class="btn export-all-btn" type="button" title="导出全部笔记为一个 Markdown 文件">💾 全部导出</button>
-    <button id="newNoteBtn" class="btn primary new-note-btn" type="button">＋ 新建笔记</button>
     <div id="sidebarResizer" class="sidebar-resizer" title="拖动调整宽度"></div>
   </aside>
   <div id="sidebarBackdrop" class="hidden"></div>
 
-  <!-- ============ 右侧主区 ============ -->
+  <!-- 阅读与书写 -->
   <main id="main">
     <header class="topbar">
-      <button id="menuBtn" class="icon-btn menu-btn" type="button" title="菜单">☰</button>
-      <div id="saveStatus" class="save-status"></div>
+      <button id="menuBtn" class="icon-btn menu-btn" type="button" title="打开笔记列表" aria-label="打开笔记列表"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
+      <div class="workspace-context"><span class="workspace-kicker">本地 · 个人空间</span><span class="workspace-caption">让思考，慢慢成形</span></div>
+      <div id="saveStatus" class="save-status" role="status" aria-live="polite"></div>
       <div class="topbar-actions">
-        <button id="exportBtn" class="btn" type="button" disabled title="导出当前笔记为 Markdown 文件">⬇ 导出</button>
-        <button id="summarizeBtn" class="btn" type="button" disabled>✨ AI 总结</button>
-        <button id="reviewBtn" class="btn" type="button" disabled>🧠 开始复盘</button>
-        <button id="settingsBtn" class="btn" type="button">⚙️ 设置</button>
+        <button id="focusBtn" class="icon-btn focus-btn" type="button" title="专注写作" aria-label="专注写作" aria-pressed="false"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></svg></button>
+        <button id="summaryOpenBtn" class="btn summary-open-btn hidden" type="button" title="查看已有总结" aria-label="查看已有总结"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6c-3-2-6-2-9-1v15c3-1 6-1 9 1 3-2 6-2 9-1V5c-3-1-6-1-9 1Z"/><path d="M12 6v15"/></svg><span>查看总结</span></button>
+        <button id="summarizeBtn" class="btn ai-action" type="button" title="AI 总结" aria-label="AI 总结" disabled><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/></svg><span>AI 总结</span></button>
+        <button id="reviewBtn" class="btn review-action" type="button" title="开始复盘" aria-label="开始复盘" disabled><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6v4H9zM9 5H6a2 2 0 0 0-2 2v13h16V7a2 2 0 0 0-2-2h-3M8 12h8M8 16h5"/></svg><span>开始复盘</span></button>
+        <details id="noteActionsMenu" class="action-menu">
+          <summary class="icon-btn" title="更多操作" aria-label="更多操作"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></summary>
+          <div class="dropdown-menu action-dropdown">
+            <button id="exportBtn" type="button" disabled><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></svg>导出当前笔记</button>
+            <button id="exportAllBtn" type="button"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6c-3-2-6-2-9-1v15c3-1 6-1 9 1 3-2 6-2 9-1V5c-3-1-6-1-9 1Z"/><path d="M12 6v15"/></svg>导出全部笔记</button>
+          </div>
+        </details>
       </div>
     </header>
+    <div class="workspace-body">
 
     <!-- 主区加载中 -->
     <div id="mainLoading" class="main-loading">加载中…</div>
 
     <!-- 空态 -->
     <section id="emptyState" class="empty-state hidden">
-      <div class="empty-icon">📝</div>
-      <h2>还没有笔记</h2>
-      <p>点击下方按钮，创建你的第一条笔记</p>
-      <button id="emptyNewBtn" class="btn primary" type="button">新建笔记</button>
+      <div class="empty-icon"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 4c-8-1-15 2-15 9a6 6 0 0 0 6 6c7 0 10-7 9-15Z"/><path d="M4 21 15 10"/></svg></div>
+      <span class="empty-eyebrow">一处空间，无限想法</span>
+      <h2>从一个想法开始</h2>
+      <p>一段灵感、一页读书摘记，或今天值得记住的小事。<br>让它们在这里，慢慢积累。</p>
+      <button id="emptyNewBtn" class="btn primary" type="button"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>写下第一篇笔记</button>
+      <span class="empty-footnote">支持 Markdown · 自动保存 · AI 辅助思考</span>
     </section>
 
     <!-- 编辑器 -->
     <section id="editorView" class="editor-view hidden">
-      <input id="titleInput" class="title-input" type="text" placeholder="标题" autocomplete="off">
+      <div class="editor-eyebrow">我的笔记</div>
+      <input id="titleInput" class="title-input" type="text" placeholder="给这个想法起个名字" aria-label="笔记标题" autocomplete="off">
+      <details id="noteProperties" class="note-properties">
+        <summary>标签与分类 <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg></summary>
+        <div class="tags-row">
+          <label for="tagsInput">标签</label>
+          <input id="tagsInput" class="tags-input" type="text" placeholder="用逗号分隔，如：工作, 学习" autocomplete="off">
+        </div>
+        <div id="quickTags" class="quick-tags"></div>
+      </details>
+      <div class="editor-controls">
       <div class="mode-toggle" role="tablist">
-        <button type="button" class="mode-btn active" data-mode="edit">编辑</button>
-        <button type="button" class="mode-btn" data-mode="source">源码</button>
+        <button type="button" class="mode-btn active" data-mode="edit" role="tab" aria-selected="true">编辑</button>
+        <button type="button" class="mode-btn" data-mode="source" role="tab" aria-selected="false">源码</button>
       </div>
-      <div id="editorArea" class="editor-area">
         <div id="mdToolbar" class="md-toolbar" role="toolbar" aria-label="Markdown 工具栏">
           <div class="md-group">
             <button type="button" class="md-btn" data-md="bold" title="加粗" aria-label="加粗"><svg viewBox="0 0 24 24"><path d="M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/><path d="M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/></svg></button>
@@ -109,30 +154,18 @@
             <button type="button" class="md-btn" id="fontSizeUp" title="放大字体" aria-label="放大字体">A⁺</button>
           </div>
         </div>
-        <textarea id="contentInput" class="content-input" placeholder="开始书写…（支持 Markdown，也可用上方按钮）" spellcheck="false"></textarea>
+      </div>
+      <div id="editorArea" class="editor-area">
+        <textarea id="contentInput" class="content-input" placeholder="写下此刻的想法…" aria-label="Markdown 源码编辑器" spellcheck="false"></textarea>
         <div id="renderEdit" class="render-edit" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="true" aria-label="笔记编辑器"></div>
         <div class="editor-stats"><span id="editorStatsCount"></span></div>
         <aside id="tocPanel" class="toc-panel hidden">
           <div class="toc-header">
-            <span>📑 目录</span>
+            <span>文档目录</span>
             <button id="tocClose" class="icon-btn" type="button" title="关闭目录" aria-label="关闭目录">✕</button>
           </div>
           <nav id="tocList" class="toc-list" aria-label="笔记目录"></nav>
         </aside>
-      </div>
-      <div class="tags-row">
-        <label for="tagsInput">标签</label>
-        <input id="tagsInput" class="tags-input" type="text" placeholder="用逗号分隔，如：工作, 学习" autocomplete="off">
-      </div>
-      <div id="quickTags" class="quick-tags"></div>
-
-      <!-- AI 总结面板 -->
-      <div id="summaryPanel" class="summary-panel hidden">
-        <div class="summary-header">
-          <span>✨ AI 总结</span>
-          <button id="summaryToggle" class="link-btn" type="button">收起</button>
-        </div>
-        <div id="summaryBody" class="summary-body"></div>
       </div>
     </section>
 
@@ -143,7 +176,7 @@
       <div id="reviewQuestionStage">
         <div class="review-header">
           <div>
-            <h2>🧠 提问式复盘</h2>
+            <h2>提问式复盘</h2>
             <div class="review-meta">
               <span id="reviewNoteTitle"></span>
               <span> · </span>
@@ -169,7 +202,7 @@
           <div id="verdictBadge" class="verdict-badge"></div>
           <div id="verdictComment" class="verdict-comment"></div>
           <div class="reference-box">
-            <button id="referenceToggle" class="reference-toggle" type="button">📎 参考要点（引用笔记原文）</button>
+            <button id="referenceToggle" class="reference-toggle" type="button">参考要点 · 笔记原文</button>
             <div id="referenceBody" class="reference-body hidden"></div>
           </div>
           <div class="verdict-actions">
@@ -182,13 +215,13 @@
       <!-- 报告阶段 -->
       <div id="reviewReportStage" class="hidden">
         <div class="report-header">
-          <h2>📊 复盘报告</h2>
+          <h2>复盘报告</h2>
         </div>
         <div class="report-stats">
           <div class="stat-card"><div class="num" id="reportTotal">0</div><div class="label">总题数</div></div>
-          <div class="stat-card good"><div class="num" id="reportCorrect">0</div><div class="label">✅ 回答正确</div></div>
-          <div class="stat-card partial"><div class="num" id="reportPartial">0</div><div class="label">⚠️ 部分正确</div></div>
-          <div class="stat-card bad"><div class="num" id="reportWrong">0</div><div class="label">❌ 回答错误</div></div>
+          <div class="stat-card good"><div class="num" id="reportCorrect">0</div><div class="label">回答正确</div></div>
+          <div class="stat-card partial"><div class="num" id="reportPartial">0</div><div class="label">部分正确</div></div>
+          <div class="stat-card bad"><div class="num" id="reportWrong">0</div><div class="label">回答错误</div></div>
         </div>
         <div class="report-section">
           <h3>薄弱点</h3>
@@ -203,20 +236,31 @@
         </div>
       </div>
     </section>
+    <div id="summaryBackdrop" class="summary-backdrop hidden" aria-hidden="true"></div>
+    <aside id="summaryPanel" class="summary-panel hidden" tabindex="-1" aria-label="AI 总结">
+      <div class="summary-header">
+        <div class="summary-heading"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/></svg><span>AI 总结</span><small class="summary-caption">梳理重点，留住思考</small></div>
+        <button id="summaryToggle" class="icon-btn" type="button" title="关闭 AI 总结" aria-label="关闭 AI 总结"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </div>
+      <div id="summaryBody" class="summary-body"></div>
+      <div class="summary-footer"><p>AI 内容仅供参考，请结合原文核对。</p><button id="summaryRegenerateBtn" class="btn" type="button"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 13 3M18 18A8 8 0 0 1 5 15"/></svg>重新总结</button></div>
+    </aside>
+    </div>
   </main>
 </div>
 
 <!-- ============ 设置模态 ============ -->
-<div id="settingsModal" class="modal-overlay hidden">
-  <div class="modal modal-wide">
+  <div id="settingsModal" class="modal-overlay hidden">
+  <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
     <div class="modal-header">
-      <h2>设置</h2>
+      <h2 id="settingsTitle">设置</h2>
       <button id="closeSettingsBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">✕</button>
     </div>
     <div class="settings-tabs" role="tablist">
-      <button type="button" class="settings-tab active" data-tab="api" role="tab" aria-selected="true">🔌 API 设置</button>
-      <button type="button" class="settings-tab" data-tab="history" role="tab" aria-selected="false">📚 复盘历史记录</button>
-      <button type="button" class="settings-tab" data-tab="trash" role="tab" aria-selected="false">🗑 回收站</button>
+      <button type="button" class="settings-tab active" data-tab="api" role="tab" aria-selected="true">AI 设置</button>
+      <button type="button" class="settings-tab" data-tab="history" role="tab" aria-selected="false">复盘历史</button>
+      <button type="button" class="settings-tab" data-tab="trash" role="tab" aria-selected="false">回收站</button>
+      <button type="button" class="settings-tab" data-tab="guide" role="tab" aria-selected="false">使用说明</button>
     </div>
     <div class="modal-body">
       <!-- API 设置面板 -->
@@ -235,7 +279,7 @@
           <input id="apiKeyInput" type="password" placeholder="sk-…" autocomplete="off">
           <button id="clearKeyBtn" class="btn danger-ghost hidden" type="button">清除</button>
         </div>
-        <p class="hint">API Key 仅保存在本地配置中，不会上传到云端。清除后需要重新填写。</p>
+        <p class="hint">API Key 加密保存在本机数据目录，不会明文展示；AI 功能（总结/复盘）只在你操作时调用。</p>
       </div>
 
       <!-- 复盘历史记录面板 -->
@@ -245,7 +289,7 @@
           <button id="historyBackBtn" class="link-btn" type="button">← 返回列表</button>
           <div id="historyDetailBody"></div>
           <div class="history-detail-actions">
-            <button id="historyDeleteBtn" class="btn danger" type="button">🗑 删除此记录</button>
+            <button id="historyDeleteBtn" class="btn danger-ghost" type="button">删除此记录</button>
           </div>
         </div>
       </div>
@@ -254,14 +298,19 @@
       <div id="trashPanel" class="settings-panel hidden">
         <div class="trash-toolbar">
           <span id="trashCount" class="trash-count"></span>
-          <button id="trashClearBtn" class="btn danger-ghost hidden" type="button">🗑 清空回收站</button>
+          <button id="trashClearBtn" class="btn danger-ghost hidden" type="button">清空回收站</button>
         </div>
         <div id="trashList" class="trash-list"></div>
       </div>
+
+      <!-- 使用说明面板 -->
+      <div id="guidePanel" class="settings-panel hidden">
+        <div id="guideContent" class="guide-content"><div class="guide-loading">加载中…</div></div>
+      </div>
     </div>
     <div class="modal-footer">
-      <button id="cancelSettingsBtn" class="btn" type="button">取消</button>
-      <button id="testConnBtn" class="btn" type="button">🔌 测试连接</button>
+      <button id="cancelSettingsBtn" class="btn" type="button">关闭</button>
+      <button id="testConnBtn" class="btn" type="button">测试连接</button>
       <button id="saveSettingsBtn" class="btn primary" type="button">保存</button>
     </div>
   </div>
@@ -271,7 +320,7 @@
 <div id="confirmDialog" class="modal-overlay hidden">
   <div class="modal small">
     <p id="confirmText" class="confirm-text"></p>
-    <input id="confirmInput" class="confirm-input hidden" type="number" min="1" max="50" step="1" autocomplete="off">
+    <input id="confirmInput" class="confirm-input hidden" type="number">
     <div id="confirmChecks" class="confirm-checks hidden"></div>
     <div class="modal-footer">
       <button id="confirmCancelBtn" class="btn" type="button">取消</button>

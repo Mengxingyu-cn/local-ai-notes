@@ -3,6 +3,7 @@ node_modules/
 *.log
 data/*.json
 !data/.gitkeep
+data/.secret
 data/*.bak-*
 node/*
 !node/README.txt
