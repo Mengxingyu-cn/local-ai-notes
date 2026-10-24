@@ -293,6 +293,12 @@ function handleNotes(req, res, segments) {
       const notes = storage.loadNotes();
       const idx = notes.findIndex((n) => n.id === id);
       if (idx < 0) return sendJSON(res, 404, { error: '笔记不存在' });
+      // F02 乐观并发：客户端声明编辑基线版本，过期即 409（以服务器为准，响应携带服务器版本）
+      if (body.baseUpdatedAt !== undefined && body.baseUpdatedAt !== null) {
+        if (notes[idx].updatedAt > (Number(body.baseUpdatedAt) || 0)) {
+          return sendJSON(res, 409, { error: '该笔记已在其它窗口被修改，已按已保存版本为准', serverNote: notes[idx] });
+        }
+      }
       if (body.title !== undefined) notes[idx].title = String(body.title).slice(0, 200);
       if (body.content !== undefined) {
         if (String(body.content).length > NOTE_MAX_LENGTH) {
@@ -495,9 +501,11 @@ async function handleAI(req, res, segments) {
   const settings = storage.loadSettings();
   const action = segments.join('/');
 
-  // Key 检查前置（Ollama 本地除外）；test 接口除外——它用请求体里的配置，Key 检查在合并后做
+  // Key 检查前置（Ollama 本地除外）；test 接口除外——它用请求体里的配置，Key 检查在合并后做；
+  // F03：查看/放弃活跃复盘会话不依赖 AI 配置，一并豁免
+  const AI_MANAGE_ACTIONS = ['review/active', 'review/abandon'];
   const isLocalOllama = settings.baseURL.includes('localhost') || settings.baseURL.includes('127.0.0.1');
-  if (action !== 'test' && !(settings.apiKey || '').trim() && !isLocalOllama) {
+  if (action !== 'test' && !AI_MANAGE_ACTIONS.includes(action) && !(settings.apiKey || '').trim() && !isLocalOllama) {
     return sendJSON(res, 400, { error: '尚未配置 API Key，请先到“设置”里配置' });
   }
 
@@ -528,8 +536,8 @@ async function handleAI(req, res, segments) {
     }
     if (action === 'summarize') {
       if (!body.noteId) throw Object.assign(new Error('缺少 noteId'), { statusCode: 400 });
-      const summary = await review.summarizeNote(settings, body.noteId);
-      return ok(res, { summary });
+      const result = await review.summarizeNote(settings, body.noteId);
+      return ok(res, { summary: result.summary, summarizedAt: result.summarizedAt, noteUpdatedAt: result.noteUpdatedAt });
     }
     if (action === 'review/start') {
       if (!body.noteId && !body.tag && !Array.isArray(body.noteIds)) throw Object.assign(new Error('缺少 noteId、tag 或 noteIds'), { statusCode: 400 });
@@ -543,6 +551,15 @@ async function handleAI(req, res, segments) {
     if (action === 'review/end') {
       if (!body.sessionId) throw Object.assign(new Error('缺少 sessionId'), { statusCode: 400 });
       return ok(res, await review.endReview(settings, body.sessionId));
+    }
+    if (action === 'review/active') {
+      // F03：活跃复盘会话列表（供前端“继续上次复盘”；含已完成待生成报告的会话）
+      return ok(res, { sessions: review.listActiveSessions() });
+    }
+    if (action === 'review/abandon') {
+      // F03：放弃复盘——不生成 AI 报告，归档进历史并标记「已放弃」，不可续答
+      if (!body.sessionId) throw Object.assign(new Error('缺少 sessionId'), { statusCode: 400 });
+      return ok(res, review.abandonReview(body.sessionId));
     }
     return sendJSON(res, 404, { error: '未知的 AI 接口' });
   } catch (e) {

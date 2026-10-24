@@ -146,24 +146,16 @@ async function callAI(settings, messages, temperature = 0.3) {
 }
 
 // 聚合多篇笔记内容：按篇截断 + 总预算控制，附纳入说明（标签组/多选笔记共用）
-function buildGroupContent(notes, GROUP_MAX, perNote) {
-  let used = 0;
-  let included = 0;
+// 聚合多篇笔记内容（F04 定稿 2026-10-24：总内容 ≤ GROUP_MAX 时全文完整读取，不做截断；
+// 超限由 startReview 在聚合前阻止开始并提示少选/拆分）
+function buildGroupContent(notes) {
   const parts = [];
   for (const n of notes) {
-    if (used >= GROUP_MAX) break;
-    const budget = Math.min(perNote, GROUP_MAX - used);
     const body = String(n.content || '');
-    const sliced = body.length > budget ? body.slice(0, budget) + '\n\n（此笔记过长，已截断）' : body;
-    if (!sliced.trim()) continue; // 空内容笔记不占预算
-    parts.push(`## 笔记：《${n.title || '无标题'}》\n\n${sliced}`);
-    used += sliced.length;
-    included++;
+    if (!body.trim()) continue; // 空内容笔记不进上下文
+    parts.push(`## 笔记：《${n.title || '无标题'}》\n\n${body}`);
   }
   if (!parts.length) return null;
-  if (included < notes.length) {
-    parts.push(`\n\n（共 ${notes.length} 篇笔记，已纳入 ${included} 篇，其余因内容过长未纳入）`);
-  }
   return parts.join('\n\n---\n\n');
 }
 
@@ -184,9 +176,14 @@ async function startReview(settings, opts) {
     const picked = noteIds.map((id) => byId.get(String(id))).filter(Boolean);
     if (!picked.length) throw Object.assign(new Error('所选笔记不存在或已被删除'), { statusCode: 404 });
     sessionNoteId = 'notes:' + picked.map((n) => n.id).join(',');
-    sessionNoteTitle = (tag ? '标签组：' + tag + '（' : '') + '选 ' + picked.length + ' 篇' + (tag ? '）' : '');
-    const perNote = Math.max(1500, Math.min(8000, Math.floor(GROUP_MAX / picked.length)));
-    content = buildGroupContent(picked, GROUP_MAX, perNote) || '';
+    // 命名（2026-10-24 定稿）：单篇用笔记标题；多篇用「首篇标题 等 N 篇」
+    const baseName = picked[0].title || '无标题笔记';
+    sessionNoteTitle = picked.length > 1 ? baseName + ' 等 ' + picked.length + ' 篇' : baseName;
+    const pickedTotal = picked.reduce((s, n) => s + String(n.content || '').length, 0);
+    if (pickedTotal > GROUP_MAX) {
+      throw Object.assign(new Error('所选笔记总内容 ' + pickedTotal + ' 字，超出单轮复盘 ' + GROUP_MAX + ' 字上限。请少选几篇，或将长笔记拆分后再试'), { statusCode: 400 });
+    }
+    content = buildGroupContent(picked) || '';
   } else if (tag) {
     const notes = loadNotes()
       .filter((n) => (n.tags || []).includes(tag))
@@ -194,14 +191,21 @@ async function startReview(settings, opts) {
     if (!notes.length) throw Object.assign(new Error('该标签组下没有笔记'), { statusCode: 404 });
     sessionNoteId = 'tag:' + tag;
     sessionNoteTitle = '标签组：' + tag;
-    const perNote = Math.max(1500, Math.min(8000, Math.floor(GROUP_MAX / notes.length)));
-    content = buildGroupContent(notes, GROUP_MAX, perNote) || '';
+    const tagTotal = notes.reduce((s, n) => s + String(n.content || '').length, 0);
+    if (tagTotal > GROUP_MAX) {
+      throw Object.assign(new Error('标签组总内容 ' + tagTotal + ' 字，超出单轮复盘 ' + GROUP_MAX + ' 字上限。请少选几篇，或将长笔记拆分后再试'), { statusCode: 400 });
+    }
+    content = buildGroupContent(notes) || '';
   } else if (noteId) {
     const note = noteById(noteId);
     if (!note) throw Object.assign(new Error('笔记不存在'), { statusCode: 404 });
     sessionNoteId = noteId;
-    sessionNoteTitle = note.title;
+    sessionNoteTitle = note.title || '无标题笔记';
     content = note.content || '';
+    const singleTotal = content.length;
+    if (singleTotal > GROUP_MAX) {
+      throw Object.assign(new Error('该笔记正文 ' + singleTotal + ' 字，超出单轮复盘 ' + GROUP_MAX + ' 字上限。请将长笔记拆分后再试'), { statusCode: 400 });
+    }
   } else {
     throw Object.assign(new Error('缺少 noteId、tag 或 noteIds'), { statusCode: 400 });
   }
@@ -222,7 +226,7 @@ async function startReview(settings, opts) {
     questions: qCount, // null = AI 自动决定题数；数字 = 固定题数（兼容旧会话）
     stats: { yes: 0, partial: 0, no: 0 },
     history: [
-      { role: 'system', content: buildSystemPrompt(content, noteId ? MAX_NOTE_CHARS : GROUP_MAX, qCount) },
+      { role: 'system', content: buildSystemPrompt(content, GROUP_MAX, qCount) },
     ],
   };
   const raw = await callAI(settings, [
@@ -313,6 +317,30 @@ async function answerReview(settings, sessionId, userAnswer) {
 }
 
 // 结束复盘：生成复盘报告（统计 + AI 建议）
+// 从会话历史中解析题目/回答/评判，存入历史以供错题回看（endReview 与 abandonReview 共用）
+function parseQAFromHistory(history) {
+  const qa = [];
+  let cur = null;
+  for (const msg of history) {
+    const c = msg.content;
+    if (msg.role === 'assistant' && c.startsWith('【问题】')) {
+      if (cur) qa.push(cur);
+      cur = { question: c.slice(4).trim(), answer: '', verdict: '', comment: '', reference: '' };
+    } else if (msg.role === 'user' && c.startsWith('我的回答：')) {
+      if (cur) cur.answer = c.slice(5).replace(/（请评判[^）]*）/, '').trim();
+    } else if (msg.role === 'assistant' && c.startsWith('【评判】')) {
+      if (cur) {
+        const parts = c.slice(4).split('|');
+        cur.verdict = parts[0] || '';
+        cur.comment = parts[1] || '';
+        cur.reference = parts[2] ? parts[2].replace('引用：', '').trim() : '';
+      }
+    }
+  }
+  if (cur) qa.push(cur);
+  return qa;
+}
+
 async function endReview(settings, sessionId) {
   let sessions = getSessions();
   let session = sessions[sessionId];
@@ -341,36 +369,15 @@ async function endReview(settings, sessionId) {
   }
   const suggestions = suggestionsText.split('\n').map((s) => s.replace(/^[-*•\s]+/, '').trim()).filter(Boolean);
 
-  // 从会话历史中解析题目/回答/评判，存入历史以供错题回看
-  function parseQAFromHistory(history) {
-    const qa = [];
-    let cur = null;
-    for (const msg of history) {
-      const c = msg.content;
-      if (msg.role === 'assistant' && c.startsWith('【问题】')) {
-        if (cur) qa.push(cur);
-        cur = { question: c.slice(4).trim(), answer: '', verdict: '', comment: '', reference: '' };
-      } else if (msg.role === 'user' && c.startsWith('我的回答：')) {
-        if (cur) cur.answer = c.slice(5).replace(/（请评判[^）]*）/, '').trim();
-      } else if (msg.role === 'assistant' && c.startsWith('【评判】')) {
-        if (cur) {
-          const parts = c.slice(4).split('|');
-          cur.verdict = parts[0] || '';
-          cur.comment = parts[1] || '';
-          cur.reference = parts[2] ? parts[2].replace('引用：', '').trim() : '';
-        }
-      }
-    }
-    if (cur) qa.push(cur);
-    return qa;
-  }
-
+  const judgedTotal = stats.yes + stats.partial + stats.no;
   const report = {
     total: session.askedCount,
+    answered: judgedTotal,
+    unanswered: Math.max(0, session.askedCount - judgedTotal),
     correct: stats.yes,
     partial: stats.partial,
     wrong: stats.no,
-    accuracy: session.askedCount ? Math.round((stats.yes / session.askedCount) * 100) : 0,
+    accuracy: judgedTotal ? Math.round((stats.yes / judgedTotal) * 100) : 0,
     weakTopics: [
       ...(stats.no > 0 ? [`答错 ${stats.no} 题：请重读笔记中对应内容`] : []),
       ...(stats.partial > 0 ? [`部分掌握 ${stats.partial} 题：缺漏点已在上方评判中标注`] : []),
@@ -404,6 +411,7 @@ async function endReview(settings, sessionId) {
 
 // AI 总结（生成后自动保存到笔记的 summary 字段，供下次查看/重新生成判断）
 async function summarizeNote(settings, noteId) {
+  const startedAt = Date.now(); // F07：summarizedAt 记录发起时刻（= 所总结正文的版本时间）
   const notes = loadNotes();
   const idx = notes.findIndex((n) => n.id === noteId);
   if (idx < 0) throw Object.assign(new Error('笔记不存在'), { statusCode: 404 });
@@ -421,9 +429,68 @@ async function summarizeNote(settings, noteId) {
   const fi = fresh.findIndex((n) => n.id === noteId);
   if (fi < 0) throw Object.assign(new Error('笔记不存在或已被删除'), { statusCode: 404 });
   fresh[fi].summary = summary;
-  fresh[fi].summarizedAt = Date.now();
+  fresh[fi].summarizedAt = startedAt;
   saveNotes(fresh);
-  return summary;
+  return { summary, summarizedAt: startedAt, noteUpdatedAt: fresh[fi].updatedAt };
 }
 
-module.exports = { startReview, answerReview, endReview, summarizeNote, MAX_QUESTIONS };
+// F03：列出活跃复盘会话（供前端“继续上次复盘”；含已完成待生成报告的会话）
+function listActiveSessions() {
+  const sessions = getSessions();
+  return Object.keys(sessions)
+    .map((id) => {
+      const s = sessions[id];
+      const judged = (s.stats.yes || 0) + (s.stats.partial || 0) + (s.stats.no || 0);
+      let nextQuestion = '';
+      for (const msg of s.history) {
+        if (msg.role === 'assistant' && msg.content.startsWith('【问题】')) nextQuestion = msg.content.slice(4).trim();
+      }
+      return {
+        sessionId: id,
+        noteTitle: s.noteTitle,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
+        askedCount: s.askedCount,
+        questions: s.questions,
+        done: !!s.done, // F03 定稿补充：已完成答题但未生成报告的会话也在列表中，供前端补生成报告
+        stats: { ...s.stats },
+        answered: judged,
+        nextQuestion,
+      };
+    })
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+// F03：放弃复盘——不生成 AI 报告，会话归档进历史（标记 abandoned），不可续答
+function abandonReview(sessionId) {
+  const sessions = getSessions();
+  const session = sessions[sessionId];
+  if (!session) throw Object.assign(new Error('复盘会话不存在或已过期'), { statusCode: 404 });
+  const judgedTotal = (session.stats.yes || 0) + (session.stats.partial || 0) + (session.stats.no || 0);
+  const entry = {
+    id: crypto.randomBytes(8).toString('hex'),
+    noteId: session.noteId,
+    noteTitle: session.noteTitle,
+    total: session.askedCount,
+    answered: judgedTotal,
+    unanswered: Math.max(0, session.askedCount - judgedTotal),
+    correct: session.stats.yes || 0,
+    partial: session.stats.partial || 0,
+    wrong: session.stats.no || 0,
+    accuracy: judgedTotal ? Math.round(((session.stats.yes || 0) / judgedTotal) * 100) : 0,
+    abandoned: true,
+    weakTopics: [],
+    suggestions: [],
+    finishedAt: Date.now(),
+    qa: parseQAFromHistory(session.history),
+  };
+  const history = loadReviewHistory();
+  history.unshift(entry);
+  if (history.length > 200) history.length = 200;
+  saveReviewHistory(history);
+  delete sessions[sessionId];
+  persist(sessions);
+  return { ok: true, historyId: entry.id };
+}
+
+module.exports = { startReview, answerReview, endReview, summarizeNote, listActiveSessions, abandonReview, MAX_QUESTIONS };

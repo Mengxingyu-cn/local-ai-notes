@@ -1,7 +1,9 @@
 'use strict';
 
-// 多篇聚合复盘的内容预算（字符），需与后端 review.js 的 GROUP_MAX 保持一致
+// 单轮复盘总内容上限（字符），需与后端 review.js 的 GROUP_MAX 保持一致：
+// 不超过即全文完整读取；超过则阻止开始并提示少选/拆分（F04 定稿 2026-10-24）
 const REVIEW_BUDGET = 40000;
+const RV_KEY = 'ai-notes-review-active'; // F03：进行中复盘的本地标记（sessionId）
 
 /* ============================================================
    栖屿笔记 — 前端逻辑（零依赖，原生 JS）
@@ -31,7 +33,10 @@ async function api(path, opts = {}) {
   try { data = await res.json(); } catch (e) { /* 空响应体 */ }
   if (!res.ok) {
     const msg = (data && (data.error || data.message)) || `请求失败（HTTP ${res.status}）`;
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status; // F02：结构化状态（409 冲突判定）
+    err.data = data;         // F02：保留响应体（如 409 的 serverNote）
+    throw err;
   }
   return data;
 }
@@ -306,6 +311,8 @@ const state = {
   saving: false,       // PUT 请求进行中
   saveTimer: null,     // 防抖定时器
   lastSavedAt: null,
+  editSeq: 0,          // 编辑序号：每次输入自增；保存成功且期间无新输入才清 dirty（F01）
+  saveChain: Promise.resolve(), // 保存串行链（F01：防并行 PUT 乱序覆盖）
 
   // 复盘会话
   review: null,        // { sessionId, question, qIndex, correctCount, answered, done, nextQuestion, verdict }
@@ -408,6 +415,8 @@ async function loadNotes() {
     } else {
       showEmpty();
     }
+    // F03：恢复上次未完成的复盘提示
+    maybeResumeReview();
   } catch (e) {
     $('#mainLoading').classList.add('hidden');
     $('#noteList').innerHTML =
@@ -760,7 +769,14 @@ function initListDensity() {
 
 async function selectNote(id, opts = {}) {
   const { saveCurrent = true } = opts;
-  if (saveCurrent) await flushSave();
+  if (saveCurrent) {
+    const fr = await flushSave();
+    if (!fr.ok) {
+      // F01：保存失败不放行切换——默认留在当前笔记（草稿与自动重试仍在），用户确认后才丢弃
+      const go = await confirmDialog('当前笔记保存失败，直接切换将丢失未保存的修改（已留本地草稿，稍后可恢复）。仍要切换吗？', '仍要切换');
+      if (!go) return;
+    }
+  }
 
   let note = getNote(id);
   if (!note) return;
@@ -779,6 +795,7 @@ async function selectNote(id, opts = {}) {
   hideSummary();
   showEditor();
   fillEditor(note);
+  await maybeRestoreDraft(note); // F01：恢复本笔记未同步的本地草稿/冲突版本
   renderNoteList();
   if (window.matchMedia('(max-width: 768px)').matches) toggleSidebar(false);
 }
@@ -868,13 +885,21 @@ function showSummary(trigger = document.activeElement) {
   $('#summaryToggle').focus({ preventScroll: true });
 }
 
+/** F07：总结版本时间已知且晚于总结时正文有修改才提示；旧数据无 summarizedAt 不提示（避免长期误报） */
+function summaryStaleBadge(note) {
+  if (!note || !note.summary || !(note.summarizedAt > 0)) return '';
+  return (note.updatedAt || 0) > note.summarizedAt
+    ? '<div class="summary-stale">原文在此总结之后有修改，建议重新总结</div>'
+    : '';
+}
+
 function openSavedSummary() {
   const note = getNote(state.currentId);
   if (!note) return;
   if (state.summaryPendingId === note.id && state.summaryGenerating) {
     $('#summaryBody').innerHTML = '<div class="loading-dots" aria-label="正在生成总结"><span></span><span></span><span></span></div>';
   } else if (note.summary) {
-    $('#summaryBody').innerHTML = renderMarkdown(note.summary);
+    $('#summaryBody').innerHTML = summaryStaleBadge(note) + renderMarkdown(note.summary);
   } else return;
   showSummary($('#summaryOpenBtn'));
 }
@@ -909,6 +934,8 @@ function fillEditor(note) {
 function onEditorInput(e) {
   if (!state.currentId) return;
   state.dirty = true;
+  state.editSeq++;
+  writeDraftThrottled(state.currentId, $('#titleInput').value, $('#contentInput').value);
   if (state.saveTimer) clearTimeout(state.saveTimer);
   state.saveTimer = setTimeout(saveCurrent, 1000);
   updateSaveStatus();
@@ -929,46 +956,120 @@ function onEditorInput(e) {
   }
 }
 
-async function saveCurrent(opts = {}) {
+// ---- F01 保存可靠性：编辑序号 + 串行保存链 + 本地草稿兑底 ----
+const DRAFT_KEY = '***';
+const CONFLICT_KEY = '***';
+function readStore(key) { try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (_) { return null; } }
+function writeStore(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (_) {} }
+function clearStore(key, noteId) {
+  const d = readStore(key);
+  if (!noteId || !d || d.noteId === noteId) { try { localStorage.removeItem(key); } catch (_) {} }
+}
+let draftTimer = null;
+function writeDraftThrottled(noteId, title, content) {
+  if (draftTimer) return;
+  draftTimer = setTimeout(() => { draftTimer = null; writeStore(DRAFT_KEY, { noteId, title, content, at: Date.now() }); }, 1000);
+}
+
+async function performSave(opts = {}) {
   const { silent = false } = opts;
-  if (!state.currentId || !state.dirty) return;
+  if (!state.currentId || !state.dirty) return { ok: true };
   if (state.saveTimer) { clearTimeout(state.saveTimer); state.saveTimer = null; }
 
-  const note = getNote(state.currentId);
-  if (!note) return;
+  const savedNoteId = state.currentId;
+  const seq = state.editSeq; // 快照编辑序号：保存期间有新输入则不清 dirty
+  const note = getNote(savedNoteId);
+  if (!note) return { ok: true };
 
   const payload = {
     title: $('#titleInput').value.trim(),
     content: $('#contentInput').value,
     tags: parseTags($('#tagsInput').value),
+    baseUpdatedAt: note.updatedAt || 0, // F02 乐观并发：服务器发现版本过期返回 409
   };
 
   state.saving = true;
   updateSaveStatus();
   try {
-    const saved = unwrapNote(await api('/api/notes/' + state.currentId, { method: 'PUT', body: payload }));
-    const fresh = getNote(state.currentId);
-    if (!fresh) return; // 保存期间笔记已被删除/退出登录：丢弃旧响应，防止覆盖新状态
+    const saved = unwrapNote(await api('/api/notes/' + savedNoteId, { method: 'PUT', body: payload }));
+    const fresh = getNote(savedNoteId);
+    if (!fresh) { clearStore(DRAFT_KEY, savedNoteId); return { ok: true }; }
     Object.assign(fresh, saved);
-    state.dirty = false;
-    state.lastSavedAt = Date.now();
-    sortNotes();
-    renderNoteList();
-    renderTags();
-    if (!silent) toast('已保存', 'success', 1400);
+    clearStore(DRAFT_KEY, savedNoteId);
+    if (seq === state.editSeq) {
+      state.dirty = false; // 保存期间无新输入：真正保存完成
+      state.lastSavedAt = Date.now();
+      sortNotes();
+      renderNoteList();
+      renderTags();
+      if (!silent) toast('已保存', 'success', 1400);
+    } else if (!state.saveTimer) {
+      state.saveTimer = setTimeout(saveCurrent, 300); // 期间有输入：保持未保存，尽快补一存
+    }
+    return { ok: true };
   } catch (e) {
+    if (e && e.status === 409 && e.data && e.data.serverNote) {
+      // F02 定案：冲突以已保存版本为准；被覆盖的本地修改写入冲突草稿（重新打开该笔记可恢复）
+      writeStore(CONFLICT_KEY, { noteId: savedNoteId, title: payload.title, content: payload.content, at: Date.now() });
+      const freshConflict = getNote(savedNoteId);
+      if (freshConflict) Object.assign(freshConflict, e.data.serverNote);
+      if (state.currentId === savedNoteId) fillEditor(freshConflict);
+      state.dirty = false;
+      state.lastSavedAt = Date.now();
+      toast('该笔记已在其它窗口被修改，已按已保存版本为准；你刚才的修改已留为本地草稿，重新打开该笔记可恢复', 'info', 6000);
+      return { ok: true };
+    }
     toast('保存失败：' + e.message, 'error');
-    // 保存失败不重置 dirty 标记，重新启动防抖定时器允许下次重试
-    state.saveTimer = setTimeout(saveCurrent, 5000);
+    if (!state.saveTimer) state.saveTimer = setTimeout(saveCurrent, 5000);
+    return { ok: false, error: e };
   } finally {
     state.saving = false;
     updateSaveStatus();
   }
 }
 
-/** 切换笔记前冲刷未保存内容 */
+/** 对外保存入口：串行排队，返回本次保存结果（F01） */
+function saveCurrent(opts = {}) {
+  const p = (state.saveChain || Promise.resolve()).then(() => performSave(opts));
+  state.saveChain = p.then(() => {}, () => {});
+  return p;
+}
+
+/** 切换/退出前的冲刷：等待在途保存并强制落盘一次，返回是否全部保存成功（F01） */
 async function flushSave() {
-  if (state.dirty) await saveCurrent({ silent: true });
+  if (state.saveTimer) { clearTimeout(state.saveTimer); state.saveTimer = null; }
+  try { await state.saveChain; } catch (_) { /* 链上失败不阻断冲刷 */ }
+  if (!state.dirty) return { ok: true };
+  const r = await performSave({ silent: true });
+  return (r.ok && !state.dirty) ? { ok: true } : { ok: false, error: r.error };
+}
+
+/** F01：打开笔记时检测本地草稿/冲突版本，提示恢复 */
+async function maybeRestoreDraft(note) {
+  if (!note || !note.id) return;
+  const conf = readStore(CONFLICT_KEY);
+  if (conf && conf.noteId === note.id) {
+    const when = conf.at ? new Date(conf.at).toLocaleTimeString() : '';
+    const go = await confirmDialog('检测到上次被已保存版本覆盖前的本地修改（' + when + '）。恢复到编辑器？', '恢复');
+    if (go) applyDraft(conf);
+    clearStore(CONFLICT_KEY, note.id);
+    return;
+  }
+  const d = readStore(DRAFT_KEY);
+  if (!d || d.noteId !== note.id) return;
+  if ((d.content || '') === (note.content || '') && (d.title || '') === (note.title || '')) { clearStore(DRAFT_KEY, note.id); return; }
+  const when2 = d.at ? new Date(d.at).toLocaleTimeString() : '';
+  const go2 = await confirmDialog('检测到本笔记未保存的本地草稿（' + when2 + '），比当前内容新。恢复到编辑器？', '恢复草稿');
+  if (go2) applyDraft(d); else clearStore(DRAFT_KEY, note.id);
+}
+
+function applyDraft(d) {
+  $('#titleInput').value = d.title || '';
+  $('#contentInput').value = d.content || '';
+  state.dirty = true;
+  state.editSeq++;
+  updateSaveStatus();
+  saveCurrent(); // 恢复后立即尝试落盘；失败时草稿保留
 }
 
 function updateSaveStatus() {
@@ -1794,14 +1895,18 @@ async function summarize() {
     prevSummary = note.summary || '';
     state.summaryGenerating = true;
     syncSummaryControls();
-    $('#summaryBody').innerHTML = '<div class="loading-dots" aria-label="正在生成总结"><span></span><span></span><span></span></div>';
+    const overLimit = (note.content || '').length > 12000; // 与后端 summarizeNote 的 MAX_NOTE_CHARS 上限一致
+    $('#summaryBody').innerHTML = '<div class="loading-dots" aria-label="正在生成总结"><span></span><span></span><span></span></div>' +
+      (overLimit ? '<div class="summary-stale">该笔记较长（' + (note.content || '').length + ' 字）：本次总结仅读取前 12000 字</div>' : '');
     showSummary($('#summarizeBtn'));
     const data = await api('/api/ai/summarize', { method: 'POST', body: { noteId: targetId } });
     if (requestSeq !== summaryRequestSeq || getNote(targetId) !== note) return;
     note.summary = data.summary || ''; // 同步本地状态（后端已持久化）
+    if (data.summarizedAt) note.summarizedAt = data.summarizedAt; // F07：总结对应的正文版本时间
+    if (data.noteUpdatedAt) note.updatedAt = data.noteUpdatedAt;
     if (requestSeq !== summaryRequestSeq || state.currentId !== targetId || state.review || getNote(targetId) !== note) return;
     // 用户已关闭或切换视图时，只更新内容与入口，不重新打开面板。
-    $('#summaryBody').innerHTML = renderMarkdown(data.summary || '（没有返回内容）');
+    $('#summaryBody').innerHTML = summaryStaleBadge(note) + renderMarkdown(data.summary || '（没有返回内容）');
   } catch (e) {
     if (requestSeq !== summaryRequestSeq || state.currentId !== targetId || state.review || getNote(targetId) !== note) return;
     // 生成失败：恢复旧总结（如有），避免 loading/错误态覆盖已保存内容
@@ -1825,66 +1930,118 @@ async function summarize() {
    状态机：idle → start 请求 → 答题中(第 qIndex 题) → 已作答(展示评判) → 下一题 / 结束 → 报告 → idle
    状态全部集中在 state.review，视图是它的投影。 */
 
-async function startReview() {
+function startReview() {
   if (state.review || $('#reviewBtn').disabled) return;
-  // 按标签组复盘：当前选中的标签（"全部"时提示先选标签组）
-  const tag = state.activeTag === '全部' ? '' : state.activeTag;
-  if (!tag) {
-    toast('请先在侧边栏选择一个标签组，再开始复盘', 'info');
-    const tagFilter = $('#tagFilter');
-    if (tagFilter) tagFilter.open = true;
-    if (window.matchMedia('(max-width: 768px)').matches) toggleSidebar(true);
-    else setSidebarCollapsed(false);
-    const firstTag = $('#tagList .tag-chip:not([data-tag="全部"])') || tagFilter?.querySelector('summary');
-    firstTag?.focus({ preventScroll: true });
-    return;
-  }
-  const groupNotes = state.notes.filter((n) => (n.tags || []).includes(tag));
-  if (!groupNotes.length) { toast('该标签组下没有笔记', 'info'); return; }
-  // 复盘前确认：多选要复盘的笔记（默认全选）；题数由 AI 根据所选笔记自动决定
-  const res = await confirmDialog(
-    '即将对标签组「' + tag + '」进行复盘。\n请选择要复盘的笔记（可多选）：',
-    '开始复盘',
-    {
-      budget: REVIEW_BUDGET, // 与后端 review.js GROUP_MAX 保持一致
-      checkboxes: groupNotes.map((n) => ({
-        id: n.id,
-        label: (n.title || '无标题') + (n.content && n.content.trim() ? '' : '（空）'),
-        checked: true,
-        len: (n.content || '').length, // 内容长度（字符），用于预算统计
-      })),
-    }
-  );
-  if (!res || !res.ok) return;
-  const pickedIds = res.checked || [];
-  if (!pickedIds.length) { toast('请至少选择一篇笔记', 'error'); return; }
-  await flushSave(); // 冲刷防抖窗口内的输入，确保复盘基于最新笔记内容
+  if (!state.notes.length) { toast('还没有笔记，先写一篇吧', 'info'); return; }
+  // 打开范围选择面板：默认显示全部笔记、全部勾选（与原流程“默认全选”一致）
+  state.reviewSelect = {
+    filterTag: '全部',
+    picked: new Set(state.notes.map((n) => n.id)),
+  };
+  renderReviewSelectTags();
+  renderReviewSelectList();
+  updateReviewSelectFooter();
+  $('#reviewSelectModal').classList.remove('hidden');
+  $('#reviewSelectList').scrollTop = 0;
+}
 
-  const btn = $('#reviewBtn');
-  const label = btn.querySelector('span') || btn;
-  btn.disabled = true;
-  label.textContent = '准备中…';
+function closeReviewSelect() {
+  $('#reviewSelectModal').classList.add('hidden');
+  state.reviewSelect = null;
+}
+
+function reviewSelectVisibleNotes() {
+  const f = state.reviewSelect.filterTag;
+  if (f === '全部') return state.notes;
+  if (f === '无标签') return state.notes.filter((n) => !(n.tags || []).length);
+  return state.notes.filter((n) => (n.tags || []).includes(f));
+}
+
+function renderReviewSelectTags() {
+  const counts = new Map();
+  state.notes.forEach((n) => (n.tags || []).forEach((t) => counts.set(t, (counts.get(t) || 0) + 1)));
+  const tags = Array.from(counts.keys()).sort((a, b) => a.localeCompare(b, 'zh'));
+  const chips = [
+    '<button class="tag-chip' + (state.reviewSelect.filterTag === '全部' ? ' active' : '') + '" type="button" data-tag="全部">全部 <span class="tag-count">' + state.notes.length + '</span></button>',
+    ...tags.map((t) =>
+      '<button class="tag-chip' + (state.reviewSelect.filterTag === t ? ' active' : '') + '" type="button" data-tag="' + esc(t) + '">' + esc(t) + ' <span class="tag-count">' + counts.get(t) + '</span></button>'
+    ),
+    '<button class="tag-chip' + (state.reviewSelect.filterTag === '无标签' ? ' active' : '') + '" type="button" data-tag="无标签">无标签 <span class="tag-count">' + state.notes.filter((n) => !(n.tags || []).length).length + '</span></button>',
+  ];
+  $('#reviewSelectTags').innerHTML = chips.join('');
+}
+
+function reviewSelectRow(note) {
+  const picked = state.reviewSelect.picked.has(note.id);
+  const title = (note.title || '').trim();
+  const tagChips = (note.tags || []).slice(0, 3).map((t) => '<span class="note-tag">' + esc(t) + '</span>').join('');
+  const more = (note.tags || []).length > 3 ? '<span class="note-tag">+' + ((note.tags || []).length - 3) + '</span>' : '';
+  return '<div class="note-item review-select-item' + (picked ? ' picked' : '') + '" data-id="' + esc(note.id) + '">' +
+    '<div class="note-item-main">' +
+      '<div class="note-item-title">' + (title ? esc(title) : '<span class="untitled">无标题</span>') + '</div>' +
+      '<div class="note-item-preview">' + esc(notePreview(note.content)) + '</div>' +
+      '<div class="note-item-meta">' + esc(relTime(note.updatedAt)) + tagChips + more + '</div>' +
+    '</div>' +
+    '<span class="review-select-check' + (picked ? ' on' : '') + '" aria-hidden="true">' + (picked ? '✓' : '') + '</span>' +
+  '</div>';
+}
+
+function renderReviewSelectList() {
+  const rows = reviewSelectVisibleNotes().map(reviewSelectRow).join('');
+  $('#reviewSelectList').innerHTML = rows || '<div class="list-empty">该筛选下没有笔记</div>';
+}
+
+function updateReviewSelectFooter() {
+  const picked = state.notes.filter((n) => state.reviewSelect.picked.has(n.id));
+  const chars = picked.reduce((s, n) => s + (n.content || '').length, 0);
+  const over = chars > REVIEW_BUDGET;
+  $('#reviewSelectStats').innerHTML = '已选 <b>' + picked.length + '</b> 篇 · 合计 <b>' + chars + '</b> 字' +
+    (over ? '<span class="review-select-over">超出 ' + REVIEW_BUDGET + ' 字上限：请减少所选笔记或拆分长笔记</span>' : '');
+  $('#reviewSelectStartBtn').disabled = !picked.length || over;
+}
+
+async function startReviewFromSelect() {
+  if (!state.reviewSelect) return;
+  const pickedIds = Array.from(state.reviewSelect.picked);
+  if (!pickedIds.length) { toast('请至少选择一篇笔记', 'error'); return; }
+  const startBtn = $('#reviewSelectStartBtn');
+  startBtn.disabled = true;
+  startBtn.textContent = '⏳ 准备中…';
   try {
-    const data = await api('/api/ai/review/start', { method: 'POST', body: { tag, noteIds: pickedIds } });
+    const fr = await flushSave(); // 冲刷防抖窗口内的输入（F01），复盘基于最新内容
+    if (!fr.ok) {
+      const go = await confirmDialog('保存失败：复盘将基于已保存的笔记版本进行。仍要开始吗？', '仍要开始');
+      if (!go) { startBtn.disabled = false; startBtn.textContent = '开始复盘'; return; }
+    }
+    const pickedNotes = pickedIds.map((id) => getNote(id)).filter(Boolean);
+    const totalChars = pickedNotes.reduce((s, n) => s + (n.content || '').length, 0);
+    if (totalChars > REVIEW_BUDGET) {
+      toast('所选笔记总内容 ' + totalChars + ' 字，超出单轮复盘 ' + REVIEW_BUDGET + ' 字上限：请少选几篇，或将长笔记拆分', 'error', 5000);
+      startBtn.disabled = false;
+      startBtn.textContent = '开始复盘';
+      return;
+    }
+    const data = await api('/api/ai/review/start', { method: 'POST', body: { noteIds: pickedIds } });
+    closeReviewSelect();
     state.review = {
       sessionId: data.sessionId,
       question: data.question,
       qIndex: 1,
-      total: data.total || null, // AI 自动决定题数时无固定总数
+      total: data.total || null,
       correctCount: 0,
       answered: 0,
       done: false,
       nextQuestion: null,
       verdict: null,
-      noteTitle: data.noteTitle || (getNote(state.currentId) || {}).title || '',
+      noteTitle: data.noteTitle || '无标题笔记',
     };
     state.report = null;
+    writeStore(RV_KEY, { sessionId: data.sessionId, noteTitle: state.review.noteTitle, at: Date.now() });
     openReviewView();
   } catch (e) {
     toast('开始复盘失败：' + e.message, 'error');
-  } finally {
-    btn.disabled = !!state.review || !getNote(state.currentId);
-    label.textContent = '开始复盘';
+    startBtn.disabled = false;
+    startBtn.textContent = '开始复盘';
   }
 }
 
@@ -1991,6 +2148,73 @@ function nextQuestion() {
   renderReviewQuestion();
 }
 
+/** F03：恢复上次未完成的复盘（含 done 补生成报告分支） */
+async function maybeResumeReview() {
+  if (state.review) return;
+  if (!$('#confirmDialog').classList.contains('hidden')) return; // 已有弹窗在先，不打断
+  const saved = readStore(RV_KEY);
+  if (!saved || !saved.sessionId) return;
+  try {
+    const data = await api('/api/ai/review/active', { method: 'POST', body: {} });
+    const s = (data.sessions || []).find((x) => x.sessionId === saved.sessionId);
+    if (!s) { clearStore(RV_KEY); return; }
+    if (s.done) {
+      // F03 定稿：答题已完成但报告未生成——补生成报告
+      const go = await confirmDialog('上次复盘「' + (s.noteTitle || '无标题笔记') + '」已完成答题但未生成报告。现在生成复盘报告？', '生成报告');
+      if (!go || state.review) return;
+      state.review = {
+        sessionId: s.sessionId,
+        question: '',
+        qIndex: s.askedCount || 1,
+        total: s.questions || null,
+        correctCount: (s.stats && s.stats.yes) || 0,
+        answered: s.answered || 0,
+        done: true,
+        nextQuestion: null,
+        verdict: null,
+        noteTitle: s.noteTitle || '',
+      };
+      writeStore(RV_KEY, { sessionId: s.sessionId, noteTitle: s.noteTitle, at: Date.now() });
+      openReviewView();
+      await endReview(true);
+      return;
+    }
+    const go = await confirmDialog('检测到未完成的复盘「' + (s.noteTitle || '无标题笔记') + '」（已答 ' + (s.answered || 0) + ' 题，24 小时内有效）。继续这次复盘？', '继续复盘');
+    if (!go || state.review) return;
+    state.review = {
+      sessionId: s.sessionId,
+      question: s.nextQuestion || '（无问题内容）',
+      qIndex: s.askedCount || 1,
+      total: s.questions || null,
+      correctCount: (s.stats && s.stats.yes) || 0,
+      answered: s.answered || 0,
+      done: false,
+      nextQuestion: null,
+      verdict: null,
+      noteTitle: s.noteTitle || '',
+    };
+    state.report = null;
+    openReviewView();
+  } catch (_) { /* 静默：会话可能已过期 */ }
+}
+
+/** F03：放弃复盘（计入历史并标记「已放弃」，不生成 AI 报告，不可续答） */
+async function abandonReview() {
+  const r = state.review;
+  if (!r) return;
+  const ok = await confirmDialog('放弃本次复盘？已答 ' + r.answered + ' 题将计入复盘历史（标记为「已放弃」），未答题目不再作答，且本会话无法继续。', '放弃');
+  if (!ok) return;
+  try {
+    await api('/api/ai/review/abandon', { method: 'POST', body: { sessionId: r.sessionId } });
+    toast('已放弃，已计入复盘历史', 'success', 2400);
+  } catch (e) {
+    toast('放弃失败：' + e.message, 'error');
+    return;
+  }
+  clearStore(RV_KEY);
+  closeReviewView();
+}
+
 /** 结束复盘：showReport=true 展示报告；false 仅静默结束会话 */
 async function endReview(showReport) {
   const r = state.review;
@@ -2000,6 +2224,7 @@ async function endReview(showReport) {
   btn.textContent = '⏳ 生成报告中…';
   try {
     const data = await api('/api/ai/review/end', { method: 'POST', body: { sessionId: r.sessionId } });
+    clearStore(RV_KEY); // 复盘正常结束：清除活跃会话标记
     // 兼容两种形态：契约 {report:{...}} 与后端直接返回 report 对象
     state.report = (data && data.report) || data || {};
     if (showReport) {
@@ -2123,8 +2348,7 @@ async function openSettings(tab = 'api') {
     $('#clearKeyBtn').classList.toggle('hidden', !hasKey);
     state.lastProvider = settings.provider || ''; // 初始化 provider 切换基线
     state.formCache = { baseURL: '', model: '' };
-    // 确保 prescription 与已保存值一致后，触发 provider 变更刷新 baseURL/model 输入框
-    onProviderChange();
+    // F05：初始化只回填已保存值，不触发 onProviderChange——预设覆盖仅在用户真实切换服务商时发生
   } catch (e) {
     toast('加载设置失败：' + e.message, 'error');
   } finally {
@@ -2262,6 +2486,8 @@ function showHistoryDetail(idx) {
       '<div class="history-stat good"><span class="num">' + (h.correct || 0) + '</span><span class="lbl">✅ 正确</span></div>' +
       '<div class="history-stat partial"><span class="num">' + (h.partial || 0) + '</span><span class="lbl">⚠️ 部分</span></div>' +
       '<div class="history-stat bad"><span class="num">' + (h.wrong || 0) + '</span><span class="lbl">❌ 错误</span></div>' +
+      (h.unanswered > 0 ? '<div class="history-stat"><span class="num">' + h.unanswered + '</span><span class="lbl">未作答</span></div>' : '') +
+      (h.abandoned ? '<div class="history-stat"><span class="num">—</span><span class="lbl">已放弃</span></div>' : '') +
       '<div class="history-stat ' + accCls + '"><span class="num">' + (h.accuracy || 0) + '%</span><span class="lbl">正确率</span></div>' +
     '</div>' +
     '<div class="history-section"><div class="history-section-title">薄弱点</div>' +
@@ -2270,8 +2496,8 @@ function showHistoryDetail(idx) {
     // 答题详情（错题回看）：每题展示问题/回答/评判/原文引用
     (h.qa && h.qa.length ? '<div class="history-section"><div class="history-section-title">答题详情（共 ' + h.qa.length + ' 题）</div>' +
       h.qa.map((q, qi) => {
-        const vLabel = q.verdict === 'yes' ? '✅ 正确' : (q.verdict === 'partial' ? '⚠️ 部分正确' : '❌ 错误');
-        const vCls = q.verdict === 'yes' ? 'yes' : (q.verdict === 'partial' ? 'partial' : 'no');
+        const vLabel = q.verdict === 'yes' ? '✅ 正确' : (q.verdict === 'partial' ? '⚠️ 部分正确' : (q.verdict === 'no' ? '❌ 错误' : '· 未作答'));
+        const vCls = q.verdict === 'yes' ? 'yes' : (q.verdict === 'partial' ? 'partial' : (q.verdict === 'no' ? 'no' : 'muted'));
         return '<div class="qa-item"><div class="qa-head"><span class="qa-num">第 ' + (qi + 1) + ' 题</span><span class="qa-verdict ' + vCls + '">' + vLabel + '</span></div>' +
           '<div class="qa-field"><span class="qa-label">问题</span>' + esc(q.question || '') + '</div>' +
           '<div class="qa-field"><span class="qa-label">你的回答</span>' + esc(q.answer || '（未作答）') + '</div>' +
@@ -2809,6 +3035,40 @@ function bindEvents() {
     }
   });
   $('#reviewBtn').addEventListener('click', startReview);
+  $('#abandonReviewBtn').addEventListener('click', abandonReview);
+  // 复盘范围选择面板
+  $('#reviewSelectCloseBtn').addEventListener('click', closeReviewSelect);
+  $('#reviewSelectCancelBtn').addEventListener('click', closeReviewSelect);
+  $('#reviewSelectModal').addEventListener('click', (e) => { if (e.target === $('#reviewSelectModal')) closeReviewSelect(); });
+  $('#reviewSelectAllBtn').addEventListener('click', () => {
+    if (!state.reviewSelect) return;
+    reviewSelectVisibleNotes().forEach((n) => state.reviewSelect.picked.add(n.id));
+    renderReviewSelectList();
+    updateReviewSelectFooter();
+  });
+  $('#reviewSelectNoneBtn').addEventListener('click', () => {
+    if (!state.reviewSelect) return;
+    reviewSelectVisibleNotes().forEach((n) => state.reviewSelect.picked.delete(n.id));
+    renderReviewSelectList();
+    updateReviewSelectFooter();
+  });
+  $('#reviewSelectStartBtn').addEventListener('click', startReviewFromSelect);
+  $('#reviewSelectTags').addEventListener('click', (e) => {
+    const chip = e.target.closest('.tag-chip');
+    if (!chip || !state.reviewSelect) return;
+    state.reviewSelect.filterTag = chip.dataset.tag;
+    renderReviewSelectTags();
+    renderReviewSelectList();
+  });
+  $('#reviewSelectList').addEventListener('click', (e) => {
+    const row = e.target.closest('.review-select-item');
+    if (!row || !state.reviewSelect) return;
+    const id = row.dataset.id;
+    if (state.reviewSelect.picked.has(id)) state.reviewSelect.picked.delete(id);
+    else state.reviewSelect.picked.add(id);
+    renderReviewSelectList();
+    updateReviewSelectFooter();
+  });
   $('#exportBtn').addEventListener('click', exportNote);
   $('#exportAllBtn').addEventListener('click', exportAllNotes);
   $('#settingsBtn').addEventListener('click', () => openSettings('api'));

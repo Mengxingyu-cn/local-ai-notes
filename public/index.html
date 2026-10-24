@@ -184,6 +184,7 @@
             </div>
           </div>
           <div class="review-header-actions">
+            <button id="abandonReviewBtn" class="btn danger-ghost" type="button">放弃</button>
             <button id="endReviewBtn" class="btn danger-ghost" type="button">结束复盘</button>
             <button id="closeReviewBtn" class="icon-btn" type="button" title="关闭">✕</button>
           </div>
@@ -325,6 +326,32 @@
     <div class="modal-footer">
       <button id="confirmCancelBtn" class="btn" type="button">取消</button>
       <button id="confirmOkBtn" class="btn danger" type="button">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 复盘范围选择 ============ -->
+<div id="reviewSelectModal" class="modal-overlay hidden">
+  <div class="modal review-select">
+    <div class="modal-header">
+      <h2>选择复盘范围</h2>
+      <button id="reviewSelectCloseBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body review-select-body">
+      <div id="reviewSelectTags" class="review-select-tags"></div>
+      <div class="review-select-toolbar">
+        <button id="reviewSelectAllBtn" class="link-btn" type="button">全选</button>
+        <button id="reviewSelectNoneBtn" class="link-btn" type="button">全不选</button>
+        <span class="review-select-hint">点击行勾选 / 取消；标签筛选只影响显示，不影响已勾选</span>
+      </div>
+      <div id="reviewSelectList" class="review-select-list"></div>
+      <div class="review-select-footer">
+        <span id="reviewSelectStats" class="review-select-stats"></span>
+        <div class="review-select-actions">
+          <button id="reviewSelectCancelBtn" class="btn" type="button">取消</button>
+          <button id="reviewSelectStartBtn" class="btn primary" type="button">开始复盘</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>

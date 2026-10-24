@@ -1742,3 +1742,29 @@ input, textarea, select { color: var(--text); }
   .sidebar-utilities .utility-btn { height: 44px; }
   .compact-list .new-note-btn { min-height: 44px; }
 }
+
+/* ===== local 联动批次（2026-10-24）：F06/F07 ===== */
+/* F07 总结过期徽标 */
+.summary-stale { margin: 0 0 10px; padding: 8px 12px; border: 1px solid #e3d9b0; background: #faf6e6; color: #7a6a2f; font-size: 13px; border-radius: 4px; }
+/* F06 未作答 */
+.qa-verdict.muted { color: #7a828c; }
+
+/* ===== 复盘范围选择面板（local 联动 2026-10-24） ===== */
+.modal.review-select { width: min(680px, 94vw); }
+.review-select-body { display: flex; flex-direction: column; gap: 12px; }
+.review-select-tags { display: flex; flex-wrap: wrap; gap: 8px; }
+.review-select-toolbar { display: flex; align-items: center; gap: 12px; }
+.review-select-toolbar .link-btn { padding: 0; }
+.review-select-hint { font-size: 12px; color: #7a828c; margin-left: auto; text-align: right; }
+.review-select-list { flex: 1 1 auto; overflow-y: auto; border: 1px solid #d9d9d4; border-radius: 6px; padding: 6px; min-height: 200px; max-height: 46vh; }
+.review-select-list .note-item { cursor: pointer; }
+.review-select-list .note-item:hover { background: #eaece4; }
+.review-select-list .note-item.picked { background: #eaf2f7; }
+.review-select-list .note-item.picked .note-item-title { color: var(--accent-dark); }
+.review-select-check { flex: none; width: 22px; height: 22px; margin-left: 8px; border: 1.5px solid #b8c4bd; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; color: transparent; align-self: center; }
+.review-select-item.picked .review-select-check { background: var(--accent); border-color: var(--accent); color: #fff; }
+.review-select-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 10px; border-top: 1px solid #d9d9d4; flex-wrap: wrap; }
+.review-select-stats { font-size: 13.5px; color: #4a5058; }
+.review-select-stats b { color: var(--ink); }
+.review-select-stats .review-select-over { display: block; color: #b3474b; font-size: 12.5px; margin-top: 2px; }
+.review-select-actions { display: flex; gap: 10px; }
