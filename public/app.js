@@ -2000,6 +2000,14 @@ function updateReviewSelectFooter() {
   $('#reviewSelectStartBtn').disabled = !picked.length || over;
 }
 
+/** F04：阅读范围摘要文案（复盘头部常显） */
+function readScopeText(included, totalChars) {
+  if (!Array.isArray(included) || !included.length) return '';
+  const read = included.reduce((s, x) => s + (x.chars || 0), 0);
+  const parts = included.map((x) => '「' + x.title + '」' + x.chars + ' 字' + (x.truncated ? '（截断）' : ''));
+  return 'AI 实际阅读 ' + read + ' / ' + (totalChars || read) + ' 字：' + parts.join('、');
+}
+
 async function startReviewFromSelect() {
   if (!state.reviewSelect) return;
   const pickedIds = Array.from(state.reviewSelect.picked);
@@ -2034,6 +2042,7 @@ async function startReviewFromSelect() {
       nextQuestion: null,
       verdict: null,
       noteTitle: data.noteTitle || '无标题笔记',
+      readInfo: readScopeText(data.included, data.totalChars),
     };
     state.report = null;
     writeStore(RV_KEY, { sessionId: data.sessionId, noteTitle: state.review.noteTitle, at: Date.now() });
@@ -2058,6 +2067,7 @@ function openReviewView() {
   const note = getNote(state.currentId);
   const title = (state.review && state.review.noteTitle) || (note ? note.title : '') || '';
   $('#reviewNoteTitle').textContent = title ? '「' + title + '」' : '';
+  $('#reviewReadScope').textContent = (state.review && state.review.readInfo) || '';
   renderReviewQuestion();
 }
 
@@ -2173,6 +2183,7 @@ async function maybeResumeReview() {
         nextQuestion: null,
         verdict: null,
         noteTitle: s.noteTitle || '',
+        readInfo: readScopeText(s.included, s.totalChars),
       };
       writeStore(RV_KEY, { sessionId: s.sessionId, noteTitle: s.noteTitle, at: Date.now() });
       openReviewView();
@@ -2192,6 +2203,7 @@ async function maybeResumeReview() {
       nextQuestion: null,
       verdict: null,
       noteTitle: s.noteTitle || '',
+      readInfo: readScopeText(s.included, s.totalChars),
     };
     state.report = null;
     openReviewView();
@@ -2250,6 +2262,14 @@ function showReportView() {
     $('#reportCorrect').textContent = rep.correct != null ? rep.correct : 0;
     $('#reportPartial').textContent = rep.partial != null ? rep.partial : 0;
     $('#reportWrong').textContent = rep.wrong != null ? rep.wrong : 0;
+    const statBox = $('#reportStats');
+    if (statBox) statBox.querySelectorAll('.stat-card.extra').forEach((x) => x.remove());
+    if (rep.unanswered > 0 && statBox) {
+      statBox.insertAdjacentHTML('beforeend', '<div class="stat-card extra"><div class="num">' + rep.unanswered + '</div><div class="label">未作答</div></div>');
+    }
+    if (rep.abandoned && statBox) {
+      statBox.insertAdjacentHTML('beforeend', '<div class="stat-card extra"><div class="num">—</div><div class="label">已放弃</div></div>');
+    }
 
     const weak = rep.weakTopics || [];
     $('#weakTopicsBox').innerHTML = weak.length

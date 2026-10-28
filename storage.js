@@ -4,7 +4,15 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(__dirname, 'data');
+
+// 笔记写入配额（saveNotes 统一强制，server.js 路由层前置检查仅作友好提示）：
+// 数量上限 + notes.json 序列化字节上限，防止恢复/总结写回等旁路绕过造成无界占用磁盘
+// 注意：默认值需与 server.js 顶部同名常量保持一致
+const NOTE_MAX_COUNT = parseInt(process.env.NOTE_MAX_COUNT, 10) || 10000;
+const USER_NOTE_TOTAL_LIMIT = parseInt(process.env.USER_NOTE_TOTAL_LIMIT, 10) || 20 * 1024 * 1024;
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -42,6 +50,14 @@ function loadNotes() {
   return Array.isArray(d.notes) ? d.notes : [];
 }
 function saveNotes(notes) {
+  // 统一写入层配额（创建/编辑/恢复/总结写回全部共用，防旁路绕过）
+  if (!Array.isArray(notes)) throw Object.assign(new Error('笔记数据非法'), { statusCode: 400 });
+  if (notes.length > NOTE_MAX_COUNT) {
+    throw Object.assign(new Error(`笔记数量超出上限（${NOTE_MAX_COUNT}），请先清理旧笔记`), { statusCode: 400 });
+  }
+  if (Buffer.byteLength(JSON.stringify(notes), 'utf8') > USER_NOTE_TOTAL_LIMIT) {
+    throw Object.assign(new Error('笔记总量超出配额，请先清理旧笔记'), { statusCode: 400 });
+  }
   saveJSON('notes.json', { notes });
 }
 
@@ -156,4 +172,4 @@ function saveTrash(trash) {
   saveJSON('trash.json', { trash });
 }
 
-module.exports = { DATA_DIR, loadNotes, saveNotes, loadSettings, saveSettings, loadReviews, saveReviews, loadReviewHistory, saveReviewHistory, loadTrash, saveTrash };
+module.exports = { DATA_DIR, NOTE_MAX_COUNT, USER_NOTE_TOTAL_LIMIT, loadNotes, saveNotes, loadSettings, saveSettings, loadReviews, saveReviews, loadReviewHistory, saveReviewHistory, loadTrash, saveTrash };

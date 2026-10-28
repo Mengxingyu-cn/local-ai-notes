@@ -16,9 +16,9 @@ const PORT = parseInt(process.env.PORT, 10) || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const MAX_BODY = 5 * 1024 * 1024; // 5MB
 const NOTE_MAX_LENGTH = parseInt(process.env.NOTE_MAX_LENGTH, 10) || 512 * 1024;  // 单篇笔记内容上限（字符）
-const NOTE_MAX_COUNT = parseInt(process.env.NOTE_MAX_COUNT, 10) || 10000;         // 笔记数量上限
+const NOTE_MAX_COUNT = parseInt(process.env.NOTE_MAX_COUNT, 10) || 10000;         // 笔记数量上限（下沉 storage.saveNotes 统一强制，此处仅作路由级前置提示）
 const TRASH_LIMIT = parseInt(process.env.TRASH_LIMIT, 10) || 200;                 // 回收站容量上限（满则拒绝删除，不静默丢弃）
-const USER_NOTE_TOTAL_LIMIT = parseInt(process.env.USER_NOTE_TOTAL_LIMIT, 10) || 20 * 1024 * 1024; // 笔记总量配额（JSON 字节，防无界占用磁盘）
+const USER_NOTE_TOTAL_LIMIT = parseInt(process.env.USER_NOTE_TOTAL_LIMIT, 10) || 20 * 1024 * 1024; // 笔记总量配额（JSON 字节，下沉 storage.saveNotes 统一强制，此处仅作路由级前置提示）
 
 // ---------- 使用说明（内置默认稿；侧栏「使用说明」与设置 Tab 共用此单一真相源） ----------
 const DEFAULT_GUIDE = [
@@ -403,8 +403,14 @@ function handleTrash(req, res, segments) {
     delete note.order;          // 清除排序位，custom 模式下按时间兜底排到列表尾部
     note.updatedAt = Date.now(); // 刷新更新时间，按时间排序时恢复的笔记出现在最前
     notes.push(note);
-    // 顺序关键：先写 notes（新位置）再写 trash（移除），任一失败都不会丢笔记
-    storage.saveNotes(notes);
+    // 顺序关键：先写 notes（新位置）再写 trash（移除），任一失败都不会丢笔记。
+    // saveNotes 含配额检查（F5）可能抛错：本分支是同步代码体，必须就地接住，
+    // 否则错误逃逸到进程兜底、请求挂死；失败时 trash 磁盘态未动，回收站记录不丢
+    try {
+      storage.saveNotes(notes);
+    } catch (e) {
+      return fail(res, e);
+    }
     storage.saveTrash(trash);
     return ok(res, { ok: true, note });
   }

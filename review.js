@@ -150,13 +150,21 @@ async function callAI(settings, messages, temperature = 0.3) {
 // 超限由 startReview 在聚合前阻止开始并提示少选/拆分）
 function buildGroupContent(notes) {
   const parts = [];
+  const included = [];
+  let totalChars = 0;
   for (const n of notes) {
     const body = String(n.content || '');
     if (!body.trim()) continue; // 空内容笔记不进上下文
     parts.push(`## 笔记：《${n.title || '无标题'}》\n\n${body}`);
+    included.push({ title: n.title || '无标题', chars: body.length, truncated: false });
+    totalChars += body.length;
   }
   if (!parts.length) return null;
-  return parts.join('\n\n---\n\n');
+  return {
+    text: parts.join('\n\n---\n\n'),
+    included,
+    totalChars,
+  };
 }
 
 // 开始复盘：建会话并出第一题
@@ -168,6 +176,8 @@ async function startReview(settings, opts) {
   let content = '';
   let sessionNoteId = null;
   let sessionNoteTitle = '';
+  let included = [];
+  let totalChars = 0;
 
   if (Array.isArray(noteIds)) {
     if (!noteIds.length) throw Object.assign(new Error('请选择要复盘的笔记'), { statusCode: 400 });
@@ -183,7 +193,8 @@ async function startReview(settings, opts) {
     if (pickedTotal > GROUP_MAX) {
       throw Object.assign(new Error('所选笔记总内容 ' + pickedTotal + ' 字，超出单轮复盘 ' + GROUP_MAX + ' 字上限。请少选几篇，或将长笔记拆分后再试'), { statusCode: 400 });
     }
-    content = buildGroupContent(picked) || '';
+    const g1 = buildGroupContent(picked);
+    if (g1) { content = g1.text; included = g1.included; totalChars = g1.totalChars; }
   } else if (tag) {
     const notes = loadNotes()
       .filter((n) => (n.tags || []).includes(tag))
@@ -195,7 +206,8 @@ async function startReview(settings, opts) {
     if (tagTotal > GROUP_MAX) {
       throw Object.assign(new Error('标签组总内容 ' + tagTotal + ' 字，超出单轮复盘 ' + GROUP_MAX + ' 字上限。请少选几篇，或将长笔记拆分后再试'), { statusCode: 400 });
     }
-    content = buildGroupContent(notes) || '';
+    const g2 = buildGroupContent(notes);
+    if (g2) { content = g2.text; included = g2.included; totalChars = g2.totalChars; }
   } else if (noteId) {
     const note = noteById(noteId);
     if (!note) throw Object.assign(new Error('笔记不存在'), { statusCode: 404 });
@@ -206,6 +218,8 @@ async function startReview(settings, opts) {
     if (singleTotal > GROUP_MAX) {
       throw Object.assign(new Error('该笔记正文 ' + singleTotal + ' 字，超出单轮复盘 ' + GROUP_MAX + ' 字上限。请将长笔记拆分后再试'), { statusCode: 400 });
     }
+    totalChars = singleTotal;
+    included = [{ title: note.title || '无标题', chars: content.length, truncated: false }];
   } else {
     throw Object.assign(new Error('缺少 noteId、tag 或 noteIds'), { statusCode: 400 });
   }
@@ -224,6 +238,7 @@ async function startReview(settings, opts) {
     updatedAt: Date.now(),
     askedCount: 0,
     questions: qCount, // null = AI 自动决定题数；数字 = 固定题数（兼容旧会话）
+    included, totalChars, // F04：逐篇实际阅读范围（响应透出，前端展示）
     stats: { yes: 0, partial: 0, no: 0 },
     history: [
       { role: 'system', content: buildSystemPrompt(content, GROUP_MAX, qCount) },
@@ -239,7 +254,7 @@ async function startReview(settings, opts) {
   session.history.push({ role: 'assistant', content: `【问题】${question}` });
   sessions[session.id] = session;
   persist(sessions);
-  return { sessionId: session.id, question, asked: session.askedCount, total: qCount, noteTitle: sessionNoteTitle };
+  return { sessionId: session.id, question, asked: session.askedCount, total: qCount, noteTitle: sessionNoteTitle, included, totalChars };
 }
 
 // 提交回答：评判 + 出下一题
@@ -455,6 +470,8 @@ function listActiveSessions() {
         done: !!s.done, // F03 定稿补充：已完成答题但未生成报告的会话也在列表中，供前端补生成报告
         stats: { ...s.stats },
         answered: judged,
+        included: s.included || [],
+        totalChars: s.totalChars || 0,
         nextQuestion,
       };
     })
