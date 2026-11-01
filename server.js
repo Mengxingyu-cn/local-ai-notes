@@ -565,7 +565,7 @@ async function handleAI(req, res, segments) {
     if (action === 'review/abandon') {
       // F03：放弃复盘——不生成 AI 报告，归档进历史并标记「已放弃」，不可续答
       if (!body.sessionId) throw Object.assign(new Error('缺少 sessionId'), { statusCode: 400 });
-      return ok(res, review.abandonReview(body.sessionId));
+      return ok(res, await review.abandonReview(body.sessionId));
     }
     return sendJSON(res, 404, { error: '未知的 AI 接口' });
   } catch (e) {

@@ -510,4 +510,26 @@ function abandonReview(sessionId) {
   return { ok: true, historyId: entry.id };
 }
 
-module.exports = { startReview, answerReview, endReview, summarizeNote, listActiveSessions, abandonReview, MAX_QUESTIONS };
+// 审查 A-5（2026-11-02 同步）：会话级互斥——同一复盘会话的 answer/end/abandon 串行化，
+// 防单机多标签页并发/重试导致重复调用模型与状态错乱
+const reviewLocks = new Map();
+function withSessionLock(sessionId, fn) {
+  const prev = reviewLocks.get(sessionId) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  const tail = run.catch(() => {});
+  reviewLocks.set(sessionId, tail);
+  tail.then(() => {
+    if (reviewLocks.get(sessionId) === tail) reviewLocks.delete(sessionId);
+  });
+  return run;
+}
+
+module.exports = {
+  startReview,
+  answerReview: (settings, sessionId, userAnswer) => withSessionLock('a:' + sessionId, () => answerReview(settings, sessionId, userAnswer)),
+  endReview: (settings, sessionId) => withSessionLock('a:' + sessionId, () => endReview(settings, sessionId)),
+  abandonReview: async (sessionId) => withSessionLock('a:' + sessionId, () => abandonReview(sessionId)),
+  summarizeNote,
+  listActiveSessions,
+  MAX_QUESTIONS,
+};

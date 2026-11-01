@@ -935,7 +935,7 @@ function onEditorInput(e) {
   if (!state.currentId) return;
   state.dirty = true;
   state.editSeq++;
-  writeDraftThrottled(state.currentId, $('#titleInput').value, $('#contentInput').value);
+  writeDraftThrottled();
   if (state.saveTimer) clearTimeout(state.saveTimer);
   state.saveTimer = setTimeout(saveCurrent, 1000);
   updateSaveStatus();
@@ -966,9 +966,22 @@ function clearStore(key, noteId) {
   if (!noteId || !d || d.noteId === noteId) { try { localStorage.removeItem(key); } catch (_) {} }
 }
 let draftTimer = null;
-function writeDraftThrottled(noteId, title, content) {
+function writeDraftThrottled() {
   if (draftTimer) return;
-  draftTimer = setTimeout(() => { draftTimer = null; writeStore(DRAFT_KEY, { noteId, title, content, at: Date.now() }); }, 1000);
+  // 审查 A-3 修正：定时器触发时实时读取编辑器当前值——旧实现把参数在调用时定格，
+  // 节流窗口（1s）内的后续输入会漏出草稿
+  draftTimer = setTimeout(() => {
+    draftTimer = null;
+    const noteId = state.currentId;
+    if (!noteId || !state.dirty) return;
+    writeStore(DRAFT_KEY, {
+      noteId,
+      title: $('#titleInput').value,
+      content: $('#contentInput').value,
+      tags: parseTags($('#tagsInput').value),
+      at: Date.now(),
+    });
+  }, 1000);
 }
 
 async function performSave(opts = {}) {
@@ -1009,8 +1022,16 @@ async function performSave(opts = {}) {
     return { ok: true };
   } catch (e) {
     if (e && e.status === 409 && e.data && e.data.serverNote) {
-      // F02 定案：冲突以已保存版本为准；被覆盖的本地修改写入冲突草稿（重新打开该笔记可恢复）
-      writeStore(CONFLICT_KEY, { noteId: savedNoteId, title: payload.title, content: payload.content, at: Date.now() });
+      // F02 定案 + 审查 A-2 修正：冲突草稿以「编辑器当前内容」为准——保存等待期间的新输入不能丢；
+      // 以已保存版本为准重置编辑器后，用户重开该笔记可完整恢复自己的修改（含最新输入与标签）
+      const sameNote = state.currentId === savedNoteId;
+      writeStore(CONFLICT_KEY, {
+        noteId: savedNoteId,
+        title: sameNote ? $('#titleInput').value.trim() : payload.title,
+        content: sameNote ? $('#contentInput').value : payload.content,
+        tags: sameNote ? parseTags($('#tagsInput').value) : payload.tags,
+        at: Date.now(),
+      });
       const freshConflict = getNote(savedNoteId);
       if (freshConflict) Object.assign(freshConflict, e.data.serverNote);
       if (state.currentId === savedNoteId) fillEditor(freshConflict);
@@ -1018,6 +1039,16 @@ async function performSave(opts = {}) {
       state.lastSavedAt = Date.now();
       toast('该笔记已在其它窗口被修改，已按已保存版本为准；你刚才的修改已留为本地草稿，重新打开该笔记可恢复', 'info', 6000);
       return { ok: true };
+    }
+    // 审查 A-3 修正：失败立即落草稿（节流定时器可能还没到），杀进程不丢本次会话输入
+    if (state.currentId === savedNoteId) {
+      writeStore(DRAFT_KEY, {
+        noteId: savedNoteId,
+        title: $('#titleInput').value,
+        content: $('#contentInput').value,
+        tags: parseTags($('#tagsInput').value),
+        at: Date.now(),
+      });
     }
     toast('保存失败：' + e.message, 'error');
     if (!state.saveTimer) state.saveTimer = setTimeout(saveCurrent, 5000);
@@ -1066,6 +1097,11 @@ async function maybeRestoreDraft(note) {
 function applyDraft(d) {
   $('#titleInput').value = d.title || '';
   $('#contentInput').value = d.content || '';
+  if (d.tags) $('#tagsInput').value = d.tags.join(', ');
+  // 审查 A-3 修正：恢复后同步渲染层（Typora 式富文本）——否则编辑模式下渲染层仍是旧内容，
+  // 点击/工具栏操作会经 syncFromRenderEdit 用旧 DOM 内容覆盖刚恢复的草稿
+  if (mode === 'edit') renderEditFromTextarea(null);
+  renderToc();
   state.dirty = true;
   state.editSeq++;
   updateSaveStatus();
@@ -1085,7 +1121,8 @@ function updateSaveStatus() {
 
 async function createNote() {
   if (state.review) { toast('复盘进行中，请先结束复盘', 'info'); return; }
-  await flushSave(); // 新建前冲刷当前笔记，防 1s 防抖窗口内丢输入（P1-8）
+  const fr = await flushSave(); // 新建前冲刷当前笔记，防 1s 防抖窗口内丢输入（P1-8）
+  if (!fr.ok) { toast('当前笔记保存失败，已留本地草稿；请稍后再新建', 'error'); return; } // 审查 A-3：新建不再忽略保存失败
   try {
     const note = unwrapNote(await api('/api/notes', { method: 'POST', body: { title: '', content: '', tags: [] } }));
     state.notes.push(note);
@@ -1103,7 +1140,8 @@ async function deleteNote(id) {
   if (state.review) { toast('复盘进行中，请先结束复盘', 'info'); return; }
   const ok = await confirmDialog('删除这条笔记？笔记将移入回收站，可随时恢复（AI 总结一并保留）。', '删除');
   if (!ok) return;
-  await flushSave(); // 冲刷防抖窗口内的输入，避免删除后 PUT 打在已删 id 上返回 404
+  const fr = await flushSave(); // 冲刷防抖窗口内的输入，避免删除后 PUT 打在已删 id 上返回 404
+  if (!fr.ok) { toast('当前笔记保存失败，请稍后再删除（已留本地草稿）', 'error'); return; } // 审查 A-3：删除不再忽略保存失败
   try {
     await api('/api/notes/' + id, { method: 'DELETE' });
     state.notes = state.notes.filter((n) => n.id !== id);
@@ -1836,7 +1874,12 @@ function downloadFile(filename, content, mime) {
 async function exportNote() {
   const note = getNote(state.currentId);
   if (!note) { toast('请先选择一条笔记', 'info'); return; }
-  await flushSave(); // 先保存未落盘内容，导出最新版
+  const fr = await flushSave(); // 先保存未落盘内容，导出最新版
+  if (!fr.ok) {
+    // 审查 A-3：导出不再静默降级为旧内容，明确告知用户
+    const go = await confirmDialog('当前笔记保存失败，导出的将是已保存的版本（不含最新修改）。继续导出？', '继续导出');
+    if (!go) return;
+  }
   const safeTitle = String(note.title || '无标题').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60);
   const tags = (note.tags || []).length ? '\n\n标签：' + note.tags.join(', ') : '';
   downloadFile(safeTitle + '.md', (note.content || '') + tags + '\n');
@@ -1846,7 +1889,11 @@ async function exportNote() {
 /** 导出全部笔记为一个 .md 文件 */
 async function exportAllNotes() {
   if (!state.notes.length) { toast('暂无笔记可导出', 'info'); return; }
-  await flushSave();
+  const fr = await flushSave(); // 审查 A-3：导出全部前确认落盘，失败时明确告知
+  if (!fr.ok) {
+    const go = await confirmDialog('有笔记尚未保存成功，导出的将是已保存的版本（不含最新修改）。继续导出？', '继续导出');
+    if (!go) return;
+  }
   const sorted = state.notes.slice().sort((a, b) => noteTime(b) - noteTime(a));
   const md = sorted.map((n) => {
     const tags = (n.tags || []).length ? '\n\n标签：' + n.tags.join(', ') : '';
@@ -1903,7 +1950,9 @@ async function summarize() {
     if (requestSeq !== summaryRequestSeq || getNote(targetId) !== note) return;
     note.summary = data.summary || ''; // 同步本地状态（后端已持久化）
     if (data.summarizedAt) note.summarizedAt = data.summarizedAt; // F07：总结对应的正文版本时间
-    if (data.noteUpdatedAt) note.updatedAt = data.noteUpdatedAt;
+    // 审查 A-2 修正：不再把总结响应的 noteUpdatedAt 合入本地版本基线——总结在本地服务侧读取的
+    // 可能是另一窗口已保存的新正文，推进本地基线会让旧正文的后续保存绕过 409 冲突检查，
+    // 静默覆盖他窗口修改。基线保持本窗口上次保存的版本；若他窗口已更新，下次保存会正常走 409 冲突流程。
     if (requestSeq !== summaryRequestSeq || state.currentId !== targetId || state.review || getNote(targetId) !== note) return;
     // 用户已关闭或切换视图时，只更新内容与入口，不重新打开面板。
     $('#summaryBody').innerHTML = summaryStaleBadge(note) + renderMarkdown(data.summary || '（没有返回内容）');
