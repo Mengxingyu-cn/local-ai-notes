@@ -428,6 +428,7 @@ async function endReview(settings, sessionId) {
   };
 
   // 持久化到复盘历史（设置 → 复盘历史记录 可查看）；带 id 与笔记关联、题目原文（错题回看）
+  let historySaved = true; // 审查 P-2b
   try {
     const historyEntry = Object.assign({
       id: crypto.randomBytes(8).toString('hex'),
@@ -440,12 +441,21 @@ async function endReview(settings, sessionId) {
     saveReviewHistory(history);
     report.historyId = historyEntry.id;
   } catch (e) {
-    // 历史保存失败不阻塞报告返回（复盘主流程优先）
+    historySaved = false;
+    // 审查 P-2b：历史保存失败不阻塞报告返回（复盘主流程优先），但不再删除活跃局——
+    // 否则用户拿到报告后关页，这局复盘就彻底找不回了；
+    // 保留 done 会话，「继续上次复盘」可重新生成报告并重试历史写入（如清理旧记录腾出配额后）
     console.error('[review] 保存复盘历史失败:', e.message);
   }
 
-  delete sessions[sessionId]; // 复盘完即归档
+  if (historySaved) {
+    delete sessions[sessionId]; // 复盘完即归档
+  } else {
+    // 审查 P-2b：保留会话（强制 done 状态，防止恢复后回到答题界面）
+    session.done = true;
+  }
   persist(sessions);
+  report.historySaved = historySaved;
   return report;
 }
 

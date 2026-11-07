@@ -368,14 +368,16 @@ function recordUndo(v, p, merge) {
 }
 
 /** 统一写 textarea：赋值 + 光标 + 触发 input（渲染重建 + 自动保存） */
-function setTaValue(ta, v, p) {
+function setTaValue(ta, v, p, programmatic) {
   ta.value = v;
   const pos = Math.max(0, Math.min(p != null ? p : v.length, v.length));
   ta.selectionStart = pos;
   ta.selectionEnd = pos;
   lastEditOffset = pos;
   lastEditEnd = pos;
-  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  // 审查 P-3：撤销/重做经第四参标记为程序化写入——onEditorInput 只同步快照基线，
+  // 不做脏标记/自动保存/防抖重建；其余调用方（渲染同步/工具栏）不带标记，行为不变
+  ta.dispatchEvent(new CustomEvent('input', { bubbles: true, detail: { programmatic: !!programmatic } }));
 }
 
 function performUndo(ta) {
@@ -384,7 +386,7 @@ function performUndo(ta) {
   const item = undoStack.pop();
   redoStack.push(cur);
   if (redoStack.length > UNDO_LIMIT) redoStack.shift();
-  setTaValue(ta, item.v, item.p);
+  setTaValue(ta, item.v, item.p, true); // 审查 P-3：撤销是程序化写入
   lastSrcSnapshot = item.v; // 审查 F2：程序化恢复后同步源码快照基线
 }
 
@@ -393,7 +395,7 @@ function performRedo(ta) {
   const cur = { v: ta.value, p: ta.selectionStart != null ? ta.selectionStart : ta.value.length };
   const item = redoStack.pop();
   undoStack.push(cur);
-  setTaValue(ta, item.v, item.p);
+  setTaValue(ta, item.v, item.p, true); // 审查 P-3：重做是程序化写入
   lastSrcSnapshot = item.v; // 审查 F2：同步源码快照基线
 }
 
@@ -938,6 +940,12 @@ function fillEditor(note) {
 function onEditorInput(e) {
   if (!state.currentId) return;
   const ta = $('#contentInput');
+  // 审查 P-3：程序化输入（撤销/重做经 setTaValue 第四参标记）不是用户编辑——只同步源码快照基线。
+  // 否则撤销被误判为输入触发自动保存，且与 F2 叠加会把撤销前状态重新压回撤销栈形成撤销循环
+  if (e && e.detail && e.detail.programmatic) {
+    lastSrcSnapshot = ta.value;
+    return;
+  }
   // 审查 F2：源码模式普通键盘输入同样进自定义撤销栈——与渲染模式的 syncFromRenderEdit 同款语义，
   // 记录「本次修改前的内容」，连续打字由 merge 合并为同一撤销单元
   if (e && e.target === ta && lastSrcSnapshot !== null && lastSrcSnapshot !== ta.value) {
@@ -2344,9 +2352,15 @@ async function endReview(showReport) {
   btn.textContent = '⏳ 生成报告中…';
   try {
     const data = await api('/api/ai/review/end', { method: 'POST', body: { sessionId: r.sessionId } });
-    clearStore(RV_KEY); // 复盘正常结束：清除活跃会话标记
     // 兼容两种形态：契约 {report:{...}} 与后端直接返回 report 对象
     state.report = (data && data.report) || data || {};
+    // 审查 P-2b：历史写入失败时服务端保留了 done 会话——保留「继续上次复盘」入口，
+    // 用户清理旧记录腾出配额后可重新生成报告；成功则照旧清除标记
+    if (state.report.historySaved === false) {
+      toast('报告已生成，但保存到复盘历史失败（磁盘或配额原因）。可清理旧记录后，从「继续上次复盘」重新生成', 'info', 6000);
+    } else {
+      clearStore(RV_KEY); // 复盘正常结束：清除活跃会话标记
+    }
     if (showReport) {
       showReportView();
     } else {

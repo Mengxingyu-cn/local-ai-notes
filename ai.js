@@ -42,6 +42,8 @@ const MAX_AI_RESPONSE_BYTES = 5 * 1024 * 1024;
 async function readBodyLimited(resp) {
   const declared = parseInt(resp.headers.get('content-length') || '0', 10);
   if (declared > MAX_AI_RESPONSE_BYTES) {
+    // 审查 C-4：预检拒绝后主动取消响应体——否则未消费的 body 会占住连接池连接直到 GC
+    try { await resp.body?.cancel?.(); } catch (_) { /* 清理失败不掩盖原错误 */ }
     throw Object.assign(new Error('AI 响应超过大小上限（5MB）'), { statusCode: 502 });
   }
   if (!resp.body || !resp.body.getReader) {
