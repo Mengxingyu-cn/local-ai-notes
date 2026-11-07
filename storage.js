@@ -8,6 +8,12 @@ const DATA_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.join(__dirname, 'data');
 
+// 审查 C-1/C-3（2026-11-07 同步）：回收站与复盘存储的字节配额——
+// 20MiB 存活配额只覆盖 notes.json，删除/复盘路径会绕过它（CWE-770）；配额可环境变量覆盖
+const USER_TRASH_TOTAL_LIMIT = parseInt(process.env.USER_TRASH_TOTAL_LIMIT, 10) || 20 * 1024 * 1024;
+const REVIEWS_STORAGE_LIMIT = parseInt(process.env.REVIEWS_STORAGE_LIMIT, 10) || 5 * 1024 * 1024;
+const REVIEW_HISTORY_LIMIT = parseInt(process.env.REVIEW_HISTORY_LIMIT, 10) || 20 * 1024 * 1024;
+
 // 笔记写入配额（saveNotes 统一强制，server.js 路由层前置检查仅作友好提示）：
 // 数量上限 + notes.json 序列化字节上限，防止恢复/总结写回等旁路绕过造成无界占用磁盘
 // 注意：默认值需与 server.js 顶部同名常量保持一致
@@ -151,6 +157,10 @@ function loadReviews() {
   return d && typeof d === 'object' && d.sessions ? d.sessions : {};
 }
 function saveReviews(sessions) {
+  // 审查 C-3：复盘会话存储字节配额（拦模型输出异常放大）
+  if (Buffer.byteLength(JSON.stringify({ sessions }), 'utf8') > REVIEWS_STORAGE_LIMIT) {
+    throw Object.assign(new Error('复盘会话存储超出配额，请结束或放弃部分进行中的复盘'), { statusCode: 400 });
+  }
   saveJSON('reviews.json', { sessions });
 }
 
@@ -160,6 +170,10 @@ function loadReviewHistory() {
   return Array.isArray(d.history) ? d.history : [];
 }
 function saveReviewHistory(history) {
+  // 审查 C-3：复盘历史存储字节配额（拦恶意模型输出累积）
+  if (Buffer.byteLength(JSON.stringify({ history }), 'utf8') > REVIEW_HISTORY_LIMIT) {
+    throw Object.assign(new Error('复盘历史存储超出配额，请删除部分旧复盘记录'), { statusCode: 400 });
+  }
   saveJSON('review-history.json', { history });
 }
 
@@ -169,6 +183,11 @@ function loadTrash() {
   return Array.isArray(d.trash) ? d.trash : [];
 }
 function saveTrash(trash) {
+  // 审查 C-1：回收站字节配额——20MiB 存活配额在删除后释放，原对象整体进 trash 无字节约束，
+  // 「创建大笔记→删除」循环可无限堆积；超限拒绝删除并引导清理（清空/彻底删除均有出口）
+  if (Buffer.byteLength(JSON.stringify(trash), 'utf8') > USER_TRASH_TOTAL_LIMIT) {
+    throw Object.assign(new Error('回收站内容超出配额，请先彻底删除部分内容或清空回收站'), { statusCode: 400 });
+  }
   saveJSON('trash.json', { trash });
 }
 

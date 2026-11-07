@@ -350,6 +350,7 @@ let lastEditEnd = 0;   // 覆盖编辑记忆的选区终点（配合 lastEditOff
 let undoStack = [];
 let redoStack = [];
 const UNDO_LIMIT = 200;
+let lastSrcSnapshot = null; // 审查 F2：源码模式普通输入的撤销快照基线（最近一次已知内容）
 
 /** 记录一次可撤销的状态（修改前调用）；merge=true 时合并进最近一次输入（连续打字作为一个撤销单元） */
 function recordUndo(v, p, merge) {
@@ -384,6 +385,7 @@ function performUndo(ta) {
   redoStack.push(cur);
   if (redoStack.length > UNDO_LIMIT) redoStack.shift();
   setTaValue(ta, item.v, item.p);
+  lastSrcSnapshot = item.v; // 审查 F2：程序化恢复后同步源码快照基线
 }
 
 function performRedo(ta) {
@@ -392,6 +394,7 @@ function performRedo(ta) {
   const item = redoStack.pop();
   undoStack.push(cur);
   setTaValue(ta, item.v, item.p);
+  lastSrcSnapshot = item.v; // 审查 F2：同步源码快照基线
 }
 
 const getNote = (id) => state.notes.find((n) => n.id === id);
@@ -908,6 +911,7 @@ function fillEditor(note) {
   if (mode === 'edit') syncFromRenderEdit(); // IME 组合中跳过的最后输入兜底同步（防丢）
   undoStack = []; // 切换笔记清空撤销栈（避免跨笔记撤销错乱）
   redoStack = [];
+  lastSrcSnapshot = note.content || ''; // 审查 F2：同步源码快照基线
   $('#titleInput').value = note.title || '';
   $('#contentInput').value = note.content || '';
   $('#tagsInput').value = (note.tags || []).join(', ');
@@ -933,6 +937,13 @@ function fillEditor(note) {
 
 function onEditorInput(e) {
   if (!state.currentId) return;
+  const ta = $('#contentInput');
+  // 审查 F2：源码模式普通键盘输入同样进自定义撤销栈——与渲染模式的 syncFromRenderEdit 同款语义，
+  // 记录「本次修改前的内容」，连续打字由 merge 合并为同一撤销单元
+  if (e && e.target === ta && lastSrcSnapshot !== null && lastSrcSnapshot !== ta.value) {
+    recordUndo(lastSrcSnapshot, ta.selectionStart, true);
+  }
+  lastSrcSnapshot = ta.value;
   state.dirty = true;
   state.editSeq++;
   writeDraftThrottled();
@@ -1098,6 +1109,7 @@ function applyDraft(d) {
   $('#titleInput').value = d.title || '';
   $('#contentInput').value = d.content || '';
   if (d.tags) $('#tagsInput').value = d.tags.join(', ');
+  lastSrcSnapshot = d.content || ''; // 审查 F2：同步源码快照基线
   // 审查 A-3 修正：恢复后同步渲染层（Typora 式富文本）——否则编辑模式下渲染层仍是旧内容，
   // 点击/工具栏操作会经 syncFromRenderEdit 用旧 DOM 内容覆盖刚恢复的草稿
   if (mode === 'edit') renderEditFromTextarea(null);
@@ -1983,9 +1995,10 @@ function startReview() {
   if (state.review || $('#reviewBtn').disabled) return;
   if (!state.notes.length) { toast('还没有笔记，先写一篇吧', 'info'); return; }
   // 打开范围选择面板：默认显示全部笔记、全部勾选（与原流程“默认全选”一致）
+  // 打开范围选择面板：审查 F6——默认不选任何笔记，由用户主动勾选（防筛选外/未注意的笔记被一起交给 AI）
   state.reviewSelect = {
     filterTag: '全部',
-    picked: new Set(state.notes.map((n) => n.id)),
+    picked: new Set(),
   };
   renderReviewSelectTags();
   renderReviewSelectList();
@@ -2144,7 +2157,7 @@ async function submitAnswer() {
   try {
     const data = await api('/api/ai/review/answer', {
       method: 'POST',
-      body: { sessionId: r.sessionId, answer },
+      body: { sessionId: r.sessionId, answer, expectedAsked: r.qIndex }, // 审查 F3：绑定题号，防响应丢失后重试错位计分
     });
     r.answered++;
     r.verdict = data.verdict || {};
@@ -2158,9 +2171,55 @@ async function submitAnswer() {
     }
     showVerdict(data);
   } catch (e) {
+    if (e && e.status === 409 && e.data && e.data.reason === 'stale-question') {
+      // 审查 F3：重试撞上已推进的会话——对账到服务端当前题目，不把同一回答错位计分
+      toast('题目已更新：已为你同步服务端的当前题目', 'info', 4000);
+      try {
+        await syncReviewFromServer();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '提交回答';
+      }
+      return;
+    }
+    if (e && e.status === 400 && /本轮复盘已结束/.test(e.message || '')) {
+      // 审查 P-4：最后一题响应丢失后的重试——会话已 done，对账补生成报告（而非卡在报错）
+      toast('该轮复盘已完成：已为你生成复盘报告', 'info', 4000);
+      try {
+        await syncReviewFromServer();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '提交回答';
+      }
+      return;
+    }
     toast('提交失败：' + e.message, 'error');
     btn.disabled = false;
     btn.textContent = '提交回答';
+  }
+}
+
+// 审查 F3：从服务端对账当前会话状态（done → 补生成报告；未 done → 刷新题面）
+async function syncReviewFromServer() {
+  const r = state.review;
+  if (!r) return;
+  try {
+    const data = await api('/api/ai/review/active', { method: 'POST', body: {} });
+    const s = (data.sessions || []).find((x) => x.sessionId === r.sessionId);
+    if (!s) { toast('复盘会话已结束，请重新开始', 'info', 4000); return; }
+    if (s.done) {
+      await endReview(true);
+      return;
+    }
+    r.qIndex = s.askedCount || 1;
+    r.total = s.questions || r.total;
+    r.correctCount = (s.stats && s.stats.yes) || 0;
+    r.question = s.nextQuestion || '（无问题内容）';
+    r.answer = '';
+    r.verdict = null;
+    renderReviewQuestion();
+  } catch (e) {
+    toast('同步失败：' + e.message, 'error');
   }
 }
 
@@ -2749,11 +2808,12 @@ async function saveSettings() {
     model,
   };
   const typedKey = $('#apiKeyInput').value;
-  if (state.clearKey) {
+  if (typedKey.trim()) {
+    state.clearKey = false; // 审查 F1：输入新 Key 即撤销清除标记（修复「清除→输入新 Key→保存被清空」）
+    body.apiKey = typedKey.trim();
+  } else if (state.clearKey) {
     body.apiKey = '';        // 清除已保存 Key
     body.clearKey = true;
-  } else if (typedKey.trim()) {
-    body.apiKey = typedKey.trim();  // 填写了新 Key（纯空格视为未填写，避免误清 Key）
   }
   // 其余情况不传 apiKey → 后端应保留原值
 
@@ -3180,6 +3240,14 @@ function bindEvents() {
     $('#apiKeyInput').value = '';
     $('#apiKeyInput').placeholder = '保存后将清除已配置的 Key';
     $('#clearKeyBtn').disabled = true;
+  });
+  // 审查 F1：输入新 Key 时撤销清除标记并恢复清除按钮——修复「清除→输入新 Key→测试用新 Key、保存却清空」的矛盾
+  $('#apiKeyInput').addEventListener('input', () => {
+    if (state.clearKey && $('#apiKeyInput').value) {
+      state.clearKey = false;
+      $('#clearKeyBtn').disabled = false;
+      $('#apiKeyInput').placeholder = 'sk-…';
+    }
   });
   $('#providerSelect').onchange = onProviderChange;
   $('#settingsModal').addEventListener('click', (e) => {

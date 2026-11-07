@@ -258,26 +258,45 @@ async function startReview(settings, opts) {
 }
 
 // 提交回答：评判 + 出下一题
-async function answerReview(settings, sessionId, userAnswer) {
+async function answerReview(settings, sessionId, userAnswer, expectedAsked) {
   let sessions = getSessions();
   let session = sessions[sessionId];
   if (!session) throw Object.assign(new Error('复盘会话不存在或已过期，请重新开始'), { statusCode: 404 });
   // 已完成/已结束的会话拒绝继续答题（防复盘状态机被无限续写撑爆）
   if (session.done) throw Object.assign(new Error('本轮复盘已结束，请开始新一轮'), { statusCode: 400 });
+  // 审查 F3：幂等对账——客户端声明它所看到的题号，与服务端不一致说明上一题的响应已丢失/他端已推进，
+  // 此时直接计分会把同一回答错位到下一题；返回 409 让前端对账到当前题目
+  if (expectedAsked !== undefined && expectedAsked !== null && session.askedCount !== expectedAsked) {
+    throw Object.assign(
+      new Error(`题目已更新：服务端当前为第 ${session.askedCount} 题，请刷新后继续`),
+      { statusCode: 409, reason: 'stale-question', serverAskedCount: session.askedCount }
+    );
+  }
   if (String(userAnswer).length > 5000) throw Object.assign(new Error('回答过长（上限 5000 字符）'), { statusCode: 400 });
+  const histLenBefore = session.history.length; // 审查 P-5：失败回滚基准（防失败路径反复撑大 history）
 
   session.history.push({ role: 'user', content: `我的回答：${userAnswer}（请评判并出下一道题，只输出 JSON）` });
   persist(sessions); // 立即落盘：AI 调用后「重新加载会话」会丢弃未持久化的内存改动（否则错题回看拿不到答案）
 
-  // 解析失败自动重试一次（同一上下文，明确要求只输出 JSON）
-  let raw = await callAI(settings, [...session.history], 0.3);
-  let parsed = extractJSON(raw);
-  if (!parsed) {
-    raw = await callAI(settings, [
-      ...session.history,
-      { role: 'user', content: '你刚才的输出不是合法 JSON，请只输出一个 JSON 对象：{"correct":"yes|partial|no","comment":"...","reference":"...","next_question":"..."}' },
-    ], 0.1);
+  // 解析失败自动重试一次（同一上下文，明确要求只输出 JSON）；
+  // 审查 P-5：连接失败/整体超时同样回滚本次追加的用户答案（不计入统计、不推进题数，允许重试）
+  let raw;
+  let parsed;
+  try {
+    raw = await callAI(settings, [...session.history], 0.3);
     parsed = extractJSON(raw);
+    if (!parsed) {
+      raw = await callAI(settings, [
+        ...session.history,
+        { role: 'user', content: '你刚才的输出不是合法 JSON，请只输出一个 JSON 对象：{"correct":"yes|partial|no","comment":"...","reference":"...","next_question":"..."}' },
+      ], 0.1);
+      parsed = extractJSON(raw);
+    }
+  } catch (e) {
+    sessions = getSessions();
+    session = sessions[sessionId];
+    if (session) { session.history.length = histLenBefore; persist(sessions); }
+    throw e;
   }
 
   // AI 调用期间会话可能被并发删除（如另一标签页结束复盘），写回前重新校验
@@ -285,16 +304,22 @@ async function answerReview(settings, sessionId, userAnswer) {
   session = sessions[sessionId];
   if (!session) throw Object.assign(new Error('复盘会话不存在或已过期，请重新开始'), { statusCode: 404 });
 
-  if (!parsed) {
-    throw Object.assign(new Error('AI 返回内容无法解析为评判结果，请重试一次或检查模型输出'), { statusCode: 502 });
+  if (!parsed || (parsed.correct !== 'yes' && parsed.correct !== 'partial' && parsed.correct !== 'no')) {
+    // 审查第二份功能报告「AI 失败措辞」：评判不可用（无法解析/正确性字段非法）时不默认 partial——
+    // 回滚本次追加的用户答案，不计入统计、不推进题数，让用户重试同一题
+    sessions = getSessions();
+    session = sessions[sessionId];
+    if (session) { session.history.length = histLenBefore; persist(sessions); }
+    throw Object.assign(new Error('AI 未能给出有效评判，请重试一次或检查模型输出'), { statusCode: 502 });
   }
 
   const verdict = {
-    correct: (parsed.correct === 'yes' || parsed.correct === 'partial' || parsed.correct === 'no') ? parsed.correct : 'partial',
-    comment: parsed.comment || '（AI 未返回评语）',
-    reference: parsed.reference || '',
+    correct: parsed.correct,
+    // 审查 C-3：模型字段限长——防恶意模型输出数 MiB 字段撑大存储
+    comment: String(parsed.comment || '（AI 未返回评语）').slice(0, 5000),
+    reference: String(parsed.reference || '').slice(0, 4000),
   };
-  let nextQuestion = String(parsed.next_question || '').trim();
+  let nextQuestion = String(parsed.next_question || '').trim().slice(0, 2000);
 
   if (verdict.correct === 'yes') session.stats.yes += 1;
   else if (verdict.correct === 'partial') session.stats.partial += 1;
@@ -368,7 +393,7 @@ async function endReview(settings, sessionId) {
       { role: 'system', content: '你是学习教练。基于下面这场复盘对话记录，用中文给出 3-5 条具体复习建议（每条一行，以 - 开头），针对薄弱点。只输出建议，不要客套。' },
       { role: 'user', content: `复盘统计：共 ${session.askedCount} 题，对 ${stats.yes}，部分对 ${stats.partial}，错 ${stats.no}。\n\n对话记录：\n${session.history.map((h) => `${h.role === 'user' ? '我' : 'AI'}：${h.content.slice(0, 500)}`).join('\n')}` },
     ], 0.5);
-    suggestionsText = raw.trim();
+    suggestionsText = raw.trim().slice(0, 20000); // 审查 C-3：建议内容限长
   } catch (_) {
     suggestionsText = '建议生成失败（不影响统计）。针对答错的题，建议回到笔记原文重读对应段落，隔天再复盘一轮。';
   }
@@ -526,7 +551,7 @@ function withSessionLock(sessionId, fn) {
 
 module.exports = {
   startReview,
-  answerReview: (settings, sessionId, userAnswer) => withSessionLock('a:' + sessionId, () => answerReview(settings, sessionId, userAnswer)),
+  answerReview: (settings, sessionId, userAnswer, expectedAsked) => withSessionLock('a:' + sessionId, () => answerReview(settings, sessionId, userAnswer, expectedAsked)),
   endReview: (settings, sessionId) => withSessionLock('a:' + sessionId, () => endReview(settings, sessionId)),
   abandonReview: async (sessionId) => withSessionLock('a:' + sessionId, () => abandonReview(sessionId)),
   summarizeNote,

@@ -261,7 +261,7 @@ function handleNotes(req, res, segments) {
           id: crypto.randomBytes(8).toString('hex'),
           title: String(body.title || '无标题笔记').slice(0, 200),
           content: String(body.content || ''),
-          tags: Array.isArray(body.tags) ? body.tags.map(String).slice(0, 20) : [],
+          tags: Array.isArray(body.tags) ? body.tags.map((t) => String(t).slice(0, 50)).slice(0, 20) : [],
           createdAt: now,
           updatedAt: now,
         };
@@ -306,7 +306,7 @@ function handleNotes(req, res, segments) {
         }
         notes[idx].content = String(body.content);
       }
-      if (body.tags !== undefined) notes[idx].tags = Array.isArray(body.tags) ? body.tags.map(String).slice(0, 20) : [];
+      if (body.tags !== undefined) notes[idx].tags = Array.isArray(body.tags) ? body.tags.map((t) => String(t).slice(0, 50)).slice(0, 20) : [];
       notes[idx].updatedAt = Date.now();
       // 总量配额（JSON 字节），超限拒绝（不落盘）
       if (Buffer.byteLength(JSON.stringify(notes), 'utf8') > USER_NOTE_TOTAL_LIMIT) {
@@ -552,7 +552,7 @@ async function handleAI(req, res, segments) {
     if (action === 'review/answer') {
       if (!body.sessionId) throw Object.assign(new Error('缺少 sessionId'), { statusCode: 400 });
       if (!body.answer || !String(body.answer).trim()) throw Object.assign(new Error('回答不能为空'), { statusCode: 400 });
-      return ok(res, await review.answerReview(settings, body.sessionId, String(body.answer)));
+      return ok(res, await review.answerReview(settings, body.sessionId, String(body.answer), body.expectedAsked));
     }
     if (action === 'review/end') {
       if (!body.sessionId) throw Object.assign(new Error('缺少 sessionId'), { statusCode: 400 });
@@ -602,7 +602,11 @@ const server = http.createServer((req, res) => {
   }
 
   // API 路由
+  // 审查 R3-2：同步路由族（handleTrash/handleReviewHistory/handleSettings 等）无自身 catch，
+  // 配额/磁盘 I/O 的 throw 原本会沿无 catch 的分发逃逸到 uncaughtException（响应未发送、连接挂起）；
+  // API 段整体包一层，任何同步路由异常都转为结构化错误响应
   if (pathname.startsWith('/api/')) {
+    try {
     if (pathname === '/api/health') return ok(res, { ok: true });
     if (pathname === '/api/providers') return ok(res, { providers: PROVIDERS });
     if (pathname === '/api/guide') {
@@ -629,6 +633,10 @@ const server = http.createServer((req, res) => {
       return handleAI(req, res, segments);
     }
     return sendJSON(res, 404, { error: '接口不存在' });
+    } catch (e) {
+      // 审查 R3-2：同步路由异常（配额/磁盘 I/O）转为结构化错误响应，不再逃逸到 uncaughtException
+      return fail(res, e);
+    }
   }
 
   // 静态文件（安全解码）
